@@ -1,9 +1,9 @@
 package org.example.agent.tool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.example.common.api.ApiError;
 import org.example.common.exception.ErrorCode;
 import org.example.common.tool.ToolErrors;
+import org.example.common.tool.ToolExecutionTemplate;
 import org.example.common.tool.ToolResult;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
@@ -29,6 +29,7 @@ public class InternalDocsTools {
     public static final String TOOL_QUERY_INTERNAL_DOCS = "queryInternalDocs";
     
     private final VectorSearchService vectorSearchService;
+    private final ToolExecutionTemplate toolExecutionTemplate;
     
     @Value("${rag.top-k:3}")
     private int topK = 3; // 默认值
@@ -40,8 +41,9 @@ public class InternalDocsTools {
      * Spring 会自动注入 VectorSearchService
      */
     @Autowired
-    public InternalDocsTools(VectorSearchService vectorSearchService) {
+    public InternalDocsTools(VectorSearchService vectorSearchService, ToolExecutionTemplate toolExecutionTemplate) {
         this.vectorSearchService = vectorSearchService;
+        this.toolExecutionTemplate = toolExecutionTemplate;
     }
     
     /**
@@ -59,24 +61,19 @@ public class InternalDocsTools {
             String query) {
         
 
-        try {
-            // 使用向量搜索服务检索相关文档
-            List<VectorSearchService.SearchResult> searchResults = 
-                    vectorSearchService.searchSimilarDocuments(query, topK);
-            
-            String message = searchResults.isEmpty()
+        ToolResult<List<VectorSearchService.SearchResult>> result = toolExecutionTemplate.execute("milvus",
+                () -> vectorSearchService.searchSimilarDocuments(query, topK),
+                exception -> ToolErrors.from(ErrorCode.MILVUS_UNAVAILABLE, exception));
+        if (result.isSuccess()) {
+            result.setMessage(result.getData().isEmpty()
                     ? "知识库中未找到相关文档"
-                    : String.format("成功检索到 %d 条相关文档", searchResults.size());
-            return objectMapper.writeValueAsString(ToolResult.success(searchResults, message));
-            
-        } catch (Exception e) {
-            logger.error("[工具错误] queryInternalDocs 执行失败", e);
-            ApiError error = ToolErrors.from(ErrorCode.MILVUS_UNAVAILABLE, e);
-            try {
-                return objectMapper.writeValueAsString(ToolResult.failure(error));
-            } catch (Exception serializationException) {
-                return "{\"success\":false,\"message\":\"知识库查询失败\"}";
-            }
+                    : String.format("成功检索到 %d 条相关文档", result.getData().size()));
+        }
+        try {
+            return objectMapper.writeValueAsString(result);
+        } catch (Exception serializationException) {
+            logger.error("[工具错误] queryInternalDocs 结果序列化失败", serializationException);
+            return "{\"success\":false,\"attempts\":1,\"message\":\"知识库查询失败\"}";
         }
     }
 }

@@ -600,7 +600,7 @@ public class QueryLogsTools {
 
     private String buildErrorResponse(ApiError error) {
         try {
-            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ToolResult.failure(error));
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ToolResult.failure(error, 1));
         } catch (Exception e) {
             return "{\"success\":false,\"message\":\"日志查询失败\"}";
         }

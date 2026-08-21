@@ -10,7 +10,6 @@ public class ApiResponse<T> {
     private String message;
     private T data;
     private String traceId;
-    private boolean retryable;
 
     public static <T> ApiResponse<T> success(T data) {
         ApiResponse<T> response = new ApiResponse<>();
@@ -26,7 +25,6 @@ public class ApiResponse<T> {
         response.setCode(error.getCode());
         response.setMessage(error.getMessage());
         response.setTraceId(error.getTraceId());
-        response.setRetryable(error.isRetryable());
         return response;
     }
 }

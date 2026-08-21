@@ -4,8 +4,10 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import org.example.common.api.ApiError;
+import org.example.common.exception.BusinessException;
 import org.example.common.exception.ErrorCode;
 import org.example.common.tool.ToolErrors;
+import org.example.common.tool.ToolExecutionTemplate;
 import org.example.common.tool.ToolResult;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -14,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -45,6 +48,9 @@ public class QueryMetricsTools {
     private boolean mockEnabled;
     
     private OkHttpClient httpClient;
+
+    @Autowired
+    private ToolExecutionTemplate toolExecutionTemplate;
     
     @jakarta.annotation.PostConstruct
     public void init() {
@@ -65,58 +71,49 @@ public class QueryMetricsTools {
     public String queryPrometheusAlerts() {
         logger.info("开始查询 Prometheus 活动告警, Mock模式: {}", mockEnabled);
         
-        try {
-            List<SimplifiedAlert> simplifiedAlerts;
-            
-            if (mockEnabled) {
-                // Mock 模式：返回与文档关联的模拟告警数据
-                simplifiedAlerts = buildMockAlerts();
-                logger.info("使用 Mock 数据，返回 {} 个模拟告警", simplifiedAlerts.size());
-            } else {
-                // 真实模式：调用 Prometheus Alerts API
-                PrometheusAlertsResult result = fetchPrometheusAlerts();
-                
-                if (!"success".equals(result.getStatus())) {
-                    return buildErrorResponse("Prometheus API 返回非成功状态: " + result.getStatus(), result.getError());
-                }
-                
-                // 转换为简化格式，对于相同的 alertname，只保留第一个
-                Set<String> seenAlertNames = new HashSet<>();
-                simplifiedAlerts = new ArrayList<>();
-                
-                for (PrometheusAlert alert : result.getData().getAlerts()) {
-                    String alertName = alert.getLabels().get("alertname");
-                    
-                    // 如果这个 alertname 已经存在，跳过
-                    if (seenAlertNames.contains(alertName)) {
-                        continue;
-                    }
-                    
-                    // 标记为已见过
-                    seenAlertNames.add(alertName);
-                    
-                    SimplifiedAlert simplified = new SimplifiedAlert();
-                    simplified.setAlertName(alertName);
-                    simplified.setDescription(alert.getAnnotations().getOrDefault("description", ""));
-                    simplified.setState(alert.getState());
-                    simplified.setActiveAt(alert.getActiveAt());
-                    simplified.setDuration(calculateDuration(alert.getActiveAt()));
-                    
-                    simplifiedAlerts.add(simplified);
-                }
-            }
-            
-            String message = String.format("成功检索到 %d 个活动告警", simplifiedAlerts.size());
-            String jsonResult = objectMapper.writerWithDefaultPrettyPrinter()
-                    .writeValueAsString(ToolResult.success(simplifiedAlerts, message));
-            logger.info("Prometheus 告警查询完成: 找到 {} 个告警", simplifiedAlerts.size());
-            
-            return jsonResult;
-            
-        } catch (Exception e) {
-            logger.error("查询 Prometheus 告警失败", e);
-            return buildErrorResponse(ToolErrors.from(ErrorCode.PROMETHEUS_UNAVAILABLE, e));
+        ToolResult<List<SimplifiedAlert>> result = toolExecutionTemplate.execute("prometheus",
+                this::loadSimplifiedAlerts,
+                exception -> ToolErrors.from(ErrorCode.PROMETHEUS_UNAVAILABLE, exception));
+        if (result.isSuccess()) {
+            result.setMessage(String.format("成功检索到 %d 个活动告警", result.getData().size()));
         }
+        try {
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result);
+        } catch (Exception exception) {
+            logger.error("序列化 Prometheus 工具结果失败", exception);
+            return buildErrorResponse(ApiError.of(ErrorCode.SYSTEM_ERROR));
+        }
+    }
+
+    private List<SimplifiedAlert> loadSimplifiedAlerts() throws Exception {
+        if (mockEnabled) {
+            List<SimplifiedAlert> mockAlerts = buildMockAlerts();
+            logger.info("使用 Mock 数据，返回 {} 个模拟告警", mockAlerts.size());
+            return mockAlerts;
+        }
+
+        PrometheusAlertsResult result = fetchPrometheusAlerts();
+        if (!"success".equals(result.getStatus()) || result.getData() == null) {
+            throw new BusinessException(ErrorCode.BUSINESS_ERROR,
+                    "Prometheus API 返回非成功状态: " + result.getStatus());
+        }
+
+        Set<String> seenAlertNames = new HashSet<>();
+        List<SimplifiedAlert> simplifiedAlerts = new ArrayList<>();
+        for (PrometheusAlert alert : result.getData().getAlerts()) {
+            String alertName = alert.getLabels().get("alertname");
+            if (!seenAlertNames.add(alertName)) {
+                continue;
+            }
+            SimplifiedAlert simplified = new SimplifiedAlert();
+            simplified.setAlertName(alertName);
+            simplified.setDescription(alert.getAnnotations().getOrDefault("description", ""));
+            simplified.setState(alert.getState());
+            simplified.setActiveAt(alert.getActiveAt());
+            simplified.setDuration(calculateDuration(alert.getActiveAt()));
+            simplifiedAlerts.add(simplified);
+        }
+        return simplifiedAlerts;
     }
     
     /**
@@ -184,6 +181,10 @@ public class QueryMetricsTools {
         
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
+                if (response.code() >= 400 && response.code() < 500 && response.code() != 429) {
+                    throw new BusinessException(ErrorCode.INVALID_REQUEST,
+                            "Prometheus 拒绝了查询请求，HTTP " + response.code());
+                }
                 throw new RuntimeException("HTTP 请求失败: " + response.code());
             }
             
@@ -226,7 +227,7 @@ public class QueryMetricsTools {
 
     private String buildErrorResponse(ApiError error) {
         try {
-            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ToolResult.failure(error));
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ToolResult.failure(error, 1));
         } catch (Exception e) {
             return "{\"success\":false,\"message\":\"工具调用失败\"}";
         }
