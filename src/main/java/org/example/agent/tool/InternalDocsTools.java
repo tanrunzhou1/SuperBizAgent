@@ -61,7 +61,7 @@ public class InternalDocsTools {
             String query) {
         
 
-        ToolResult<List<VectorSearchService.SearchResult>> result = toolExecutionTemplate.execute("milvus",
+        ToolResult<List<VectorSearchService.SearchResult>> result = toolExecutionTemplate.execute(TOOL_QUERY_INTERNAL_DOCS,
                 () -> vectorSearchService.searchSimilarDocuments(query, topK),
                 exception -> ToolErrors.from(ErrorCode.MILVUS_UNAVAILABLE, exception));
         if (result.isSuccess()) {

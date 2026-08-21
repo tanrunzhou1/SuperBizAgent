@@ -5,22 +5,19 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
+import java.util.Map;
+
 @Getter
 @Setter
 @Component
 @ConfigurationProperties(prefix = "tool.retry")
 public class ToolRetryProperties {
     private RetryPolicy defaults = new RetryPolicy();
-    private RetryPolicy prometheus = new RetryPolicy();
-    private RetryPolicy milvus = new RetryPolicy();
+    private Map<String, RetryPolicy> policies = new HashMap<>();
 
     public RetryPolicy forTool(String toolName) {
-        RetryPolicy policy = switch (toolName) {
-            case "prometheus" -> prometheus;
-            case "milvus" -> milvus;
-            default -> defaults;
-        };
-        return policy.resolve(defaults);
+        return policies.getOrDefault(toolName, defaults).resolve(defaults);
     }
 
     @Getter

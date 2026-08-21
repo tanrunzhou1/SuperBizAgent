@@ -2,6 +2,7 @@ package org.example.common.tool;
 
 import org.example.common.api.ApiError;
 import org.example.common.api.TraceIdContext;
+import org.example.common.exception.ErrorCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -13,15 +14,22 @@ import java.util.function.Function;
 public class ToolExecutionTemplate {
     private static final Logger logger = LoggerFactory.getLogger(ToolExecutionTemplate.class);
 
-    private final ToolRetryProperties retryProperties;
+    private final ToolRegistry toolRegistry;
 
-    public ToolExecutionTemplate(ToolRetryProperties retryProperties) {
-        this.retryProperties = retryProperties;
+    public ToolExecutionTemplate(ToolRegistry toolRegistry) {
+        this.toolRegistry = toolRegistry;
     }
 
     public <T> ToolResult<T> execute(String toolName, ThrowingSupplier<T> action,
             Function<Exception, ApiError> errorMapper) {
-        ToolRetryProperties.RetryPolicy policy = retryProperties.forTool(toolName);
+        ToolRegistry.ToolDescriptor descriptor = toolRegistry.find(toolName).orElse(null);
+        if (descriptor == null) {
+            return ToolResult.failure(ApiError.of(ErrorCode.BUSINESS_ERROR, "工具未注册: " + toolName), 0);
+        }
+        if (!descriptor.isEnabled()) {
+            return ToolResult.failure(ApiError.of(ErrorCode.BUSINESS_ERROR, "工具未启用: " + toolName), 0);
+        }
+        ToolRetryProperties.RetryPolicy policy = descriptor.getRetryPolicy();
         int maxAttempts = Math.max(1, policy.getMaxAttempts());
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {

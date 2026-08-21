@@ -71,7 +71,7 @@ public class QueryMetricsTools {
     public String queryPrometheusAlerts() {
         logger.info("开始查询 Prometheus 活动告警, Mock模式: {}", mockEnabled);
         
-        ToolResult<List<SimplifiedAlert>> result = toolExecutionTemplate.execute("prometheus",
+        ToolResult<List<SimplifiedAlert>> result = toolExecutionTemplate.execute(TOOL_QUERY_PROMETHEUS_ALERTS,
                 this::loadSimplifiedAlerts,
                 exception -> ToolErrors.from(ErrorCode.PROMETHEUS_UNAVAILABLE, exception));
         if (result.isSuccess()) {
