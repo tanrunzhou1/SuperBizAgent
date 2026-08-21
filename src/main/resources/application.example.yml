@@ -23,7 +23,7 @@ milvus:
 spring:
   ai:
     dashscope:
-      api-key: sk-bc67e51001fd4749a5389715aaf8e600  # 从环境变量读取或使用默认值
+      api-key: sk-xxx  # 从环境变量读取或使用默认值
       chat:
         options:
           timeout: 180000  # 超时时间180秒（3分钟）
@@ -33,7 +33,7 @@ spring:
           initial-interval: 2000  # 初始重试间隔2秒
           multiplier: 2  # 重试间隔倍数
           max-interval: 10000  # 最大重试间隔10秒
-    
+
     # Spring AI MCP 客户端配置
     # 如果使用mock数据，请注释这部分内容
 #    mcp:
@@ -52,7 +52,7 @@ spring:
 # 阿里云 DashScope Embedding API 配置
 dashscope:
   api:
-    key: sk-bc67e51001fd4749a5389715aaf8e600  # 从环境变量读取或使用默认值（用于自定义配置）
+    key: sk-xxx  # 从环境变量读取或使用默认值（用于自定义配置）
   embedding:
     model: text-embedding-v4  # 阿里云文本向量化模型
 

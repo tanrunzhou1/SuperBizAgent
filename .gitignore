@@ -54,3 +54,5 @@ uploads/
 ### docker
 /volumes
 /server.pid
+
+src/main/resources/application.yml
