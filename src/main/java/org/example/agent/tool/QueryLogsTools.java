@@ -3,6 +3,10 @@ package org.example.agent.tool;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
+import org.example.common.api.ApiError;
+import org.example.common.exception.ErrorCode;
+import org.example.common.tool.ToolErrors;
+import org.example.common.tool.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
@@ -178,7 +182,8 @@ public class QueryLogsTools {
                 logger.info("使用 Mock 数据，返回 {} 条日志", logEntries.size());
             } else {
                 // 真实模式：调用 CLS API（这里预留接口，后续实现）
-                return buildErrorResponse("CLS 真实查询尚未实现，请启用 mock 模式进行测试");
+                return buildErrorResponse(ApiError.of(ErrorCode.MCP_UNAVAILABLE,
+                        "日志服务尚未接入，请启用 mock 模式或配置 MCP 服务"));
             }
             
             // 构建成功响应
@@ -198,7 +203,7 @@ public class QueryLogsTools {
             
         } catch (Exception e) {
             logger.error("查询日志失败", e);
-            return buildErrorResponse("查询失败: " + e.getMessage());
+            return buildErrorResponse(ToolErrors.from(ErrorCode.MCP_UNAVAILABLE, e));
         }
     }
 
@@ -590,13 +595,14 @@ public class QueryLogsTools {
      * 构建错误响应
      */
     private String buildErrorResponse(String message) {
+        return buildErrorResponse(ApiError.of(ErrorCode.MCP_UNAVAILABLE, message));
+    }
+
+    private String buildErrorResponse(ApiError error) {
         try {
-            QueryLogsOutput output = new QueryLogsOutput();
-            output.setSuccess(false);
-            output.setMessage(message);
-            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ToolResult.failure(error));
         } catch (Exception e) {
-            return String.format("{\"success\":false,\"message\":\"%s\"}", message);
+            return "{\"success\":false,\"message\":\"日志查询失败\"}";
         }
     }
     

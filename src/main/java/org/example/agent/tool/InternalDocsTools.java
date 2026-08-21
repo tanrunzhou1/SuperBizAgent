@@ -1,6 +1,10 @@
 package org.example.agent.tool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.common.api.ApiError;
+import org.example.common.exception.ErrorCode;
+import org.example.common.tool.ToolErrors;
+import org.example.common.tool.ToolResult;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,20 +64,19 @@ public class InternalDocsTools {
             List<VectorSearchService.SearchResult> searchResults = 
                     vectorSearchService.searchSimilarDocuments(query, topK);
             
-            if (searchResults.isEmpty()) {
-                return "{\"status\": \"no_results\", \"message\": \"No relevant documents found in the knowledge base.\"}";
-            }
-            
-            // 将搜索结果转换为 JSON 格式
-            String resultJson = objectMapper.writeValueAsString(searchResults);
-            
-
-            return resultJson;
+            String message = searchResults.isEmpty()
+                    ? "知识库中未找到相关文档"
+                    : String.format("成功检索到 %d 条相关文档", searchResults.size());
+            return objectMapper.writeValueAsString(ToolResult.success(searchResults, message));
             
         } catch (Exception e) {
             logger.error("[工具错误] queryInternalDocs 执行失败", e);
-            return String.format("{\"status\": \"error\", \"message\": \"Failed to query internal docs: %s\"}", 
-                    e.getMessage());
+            ApiError error = ToolErrors.from(ErrorCode.MILVUS_UNAVAILABLE, e);
+            try {
+                return objectMapper.writeValueAsString(ToolResult.failure(error));
+            } catch (Exception serializationException) {
+                return "{\"success\":false,\"message\":\"知识库查询失败\"}";
+            }
         }
     }
 }

@@ -1,7 +1,7 @@
 // SuperBizAgent 前端应用
 class SuperBizAgentApp {
     constructor() {
-        this.apiBaseUrl = 'http://localhost:9900/api';
+        this.apiBaseUrl = '/api';
         this.currentMode = 'quick'; // 'quick' 或 'stream'
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
@@ -549,6 +549,19 @@ class SuperBizAgentApp {
         return 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
     }
 
+    getErrorMessage(error, fallback = '请求失败') {
+        if (!error) return fallback;
+        if (typeof error === 'string') return error;
+        const message = error.message || fallback;
+        return error.traceId ? `${message}（追踪ID: ${error.traceId}）` : message;
+    }
+
+    createSseError(error, fallback) {
+        const exception = new Error(this.getErrorMessage(error, fallback));
+        exception.isSseError = true;
+        return exception;
+    }
+
     // 发送消息
     async sendMessage() {
         let message = '';
@@ -616,12 +629,12 @@ class SuperBizAgentApp {
                 })
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
             const data = await response.json();
             console.log('[sendQuickMessage] 响应数据:', JSON.stringify(data));
+
+            if (!response.ok) {
+                throw new Error(this.getErrorMessage(data, `HTTP错误: ${response.status}`));
+            }
             
             // 移除等待提示消息
             if (loadingMessage && loadingMessage.parentNode) {
@@ -647,7 +660,7 @@ class SuperBizAgentApp {
                 }
             } else {
                 // HTTP 成功但业务失败
-                throw new Error(data.message || '请求失败');
+                throw new Error(this.getErrorMessage(data, '请求失败'));
             }
         } catch (error) {
             // 出错时也要移除等待提示消息
@@ -759,7 +772,7 @@ class SuperBizAgentApp {
                                         console.error('[SSE调试] 收到错误:', sseMessage.data);
                                         if (assistantMessageElement) {
                                             const messageContent = assistantMessageElement.querySelector('.message-content');
-                                            messageContent.innerHTML = this.renderMarkdown('错误: ' + (sseMessage.data || '未知错误'));
+                                            messageContent.innerHTML = this.renderMarkdown('错误: ' + this.getErrorMessage(sseMessage.data, '未知错误'));
                                         }
                                         return;
                                     }
@@ -1062,18 +1075,18 @@ class SuperBizAgentApp {
                 body: formData
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
             const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(this.getErrorMessage(data, `HTTP错误: ${response.status}`));
+            }
 
             if ((data.code === 200 || data.message === 'success') && data.data) {
                 // 在聊天界面显示上传成功消息
                 const successMessage = `${file.name} 上传到知识库成功`;
                 this.addMessage('assistant', successMessage, false, true);
             } else {
-                throw new Error(data.message || '上传失败');
+                throw new Error(this.getErrorMessage(data, '上传失败'));
             }
         } catch (error) {
             console.error('文件上传失败:', error);
@@ -1175,10 +1188,10 @@ class SuperBizAgentApp {
                                                 this.updateAIOpsMessage(loadingMessageElement, fullResponse, []);
                                                 return true;
                                             } else if (sseMessage.type === 'error') {
-                                                throw new Error(sseMessage.data || '智能运维分析失败');
+                                                throw this.createSseError(sseMessage.data, '智能运维分析失败');
                                             }
                                         } catch (e) {
-                                            if (e.message.includes('智能运维')) throw e;
+                                            if (e.isSseError) throw e;
                                             console.log('[AI Ops SSE] 单个JSON解析失败:', jsonStr);
                                         }
                                     }
@@ -1208,7 +1221,7 @@ class SuperBizAgentApp {
                                             this.updateAIOpsMessage(loadingMessageElement, fullResponse, []);
                                             return;
                                         } else if (sseMessage.type === 'error') {
-                                            throw new Error(sseMessage.data || '智能运维分析失败');
+                                            throw this.createSseError(sseMessage.data, '智能运维分析失败');
                                         }
                                     } else {
                                         fullResponse += rawData;
@@ -1217,7 +1230,7 @@ class SuperBizAgentApp {
                                         }
                                     }
                                 } catch (e) {
-                                    if (e.message.includes('智能运维')) throw e;
+                                    if (e.isSseError) throw e;
                                     // 非 JSON 格式，直接追加原始数据
                                     fullResponse += rawData;
                                     if (loadingMessageElement) {

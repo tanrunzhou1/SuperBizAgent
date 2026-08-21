@@ -3,6 +3,10 @@ package org.example.agent.tool;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
+import org.example.common.api.ApiError;
+import org.example.common.exception.ErrorCode;
+import org.example.common.tool.ToolErrors;
+import org.example.common.tool.ToolResult;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -102,20 +106,16 @@ public class QueryMetricsTools {
                 }
             }
             
-            // 构建成功响应
-            PrometheusAlertsOutput output = new PrometheusAlertsOutput();
-            output.setSuccess(true);
-            output.setAlerts(simplifiedAlerts);
-            output.setMessage(String.format("成功检索到 %d 个活动告警", simplifiedAlerts.size()));
-            
-            String jsonResult = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
+            String message = String.format("成功检索到 %d 个活动告警", simplifiedAlerts.size());
+            String jsonResult = objectMapper.writerWithDefaultPrettyPrinter()
+                    .writeValueAsString(ToolResult.success(simplifiedAlerts, message));
             logger.info("Prometheus 告警查询完成: 找到 {} 个告警", simplifiedAlerts.size());
             
             return jsonResult;
             
         } catch (Exception e) {
             logger.error("查询 Prometheus 告警失败", e);
-            return buildErrorResponse("查询失败", e.getMessage());
+            return buildErrorResponse(ToolErrors.from(ErrorCode.PROMETHEUS_UNAVAILABLE, e));
         }
     }
     
@@ -221,14 +221,14 @@ public class QueryMetricsTools {
      * 构建错误响应
      */
     private String buildErrorResponse(String message, String error) {
+        return buildErrorResponse(ApiError.of(ErrorCode.PROMETHEUS_UNAVAILABLE, message));
+    }
+
+    private String buildErrorResponse(ApiError error) {
         try {
-            PrometheusAlertsOutput output = new PrometheusAlertsOutput();
-            output.setSuccess(false);
-            output.setMessage(message);
-            output.setError(error);
-            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(ToolResult.failure(error));
         } catch (Exception e) {
-            return String.format("{\"success\":false,\"message\":\"%s\",\"error\":\"%s\"}", message, error);
+            return "{\"success\":false,\"message\":\"工具调用失败\"}";
         }
     }
     

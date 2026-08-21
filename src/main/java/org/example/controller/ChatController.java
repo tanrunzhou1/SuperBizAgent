@@ -10,6 +10,12 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
+import org.example.common.api.ApiError;
+import org.example.common.api.ApiResponse;
+import org.example.common.api.SseMessage;
+import org.example.common.exception.AppException;
+import org.example.common.exception.BusinessException;
+import org.example.common.exception.ErrorCode;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
 import org.slf4j.Logger;
@@ -63,51 +69,30 @@ public class ChatController {
      */
     @PostMapping("/chat")
     public ResponseEntity<ApiResponse<ChatResponse>> chat(@RequestBody ChatRequest request) {
-        try {
-            logger.info("收到对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
+        logger.info("收到对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
 
-            // 参数校验
-            if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
-                logger.warn("问题内容为空");
-                return ResponseEntity.ok(ApiResponse.success(ChatResponse.error("问题内容不能为空")));
-            }
-
-            // 获取或创建会话
-            SessionInfo session = getOrCreateSession(request.getId());
-            
-            // 获取历史消息
-            List<Map<String, String>> history = session.getHistory();
-            logger.info("会话历史消息对数: {}", history.size() / 2);
-
-            // 创建 DashScope API 和 ChatModel
-            DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-            DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
-
-            // 记录可用工具
-            chatService.logAvailableTools();
-
-            logger.info("开始 ReactAgent 对话（支持自动工具调用）");
-            
-            // 构建系统提示词（包含历史消息）
-            String systemPrompt = chatService.buildSystemPrompt(history);
-            
-            // 创建 ReactAgent
-            ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
-            
-            // 执行对话
-            String fullAnswer = chatService.executeChat(agent, request.getQuestion());
-            
-            // 更新会话历史
-            session.addMessage(request.getQuestion(), fullAnswer);
-            logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
-                request.getId(), session.getMessagePairCount());
-            
-            return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(fullAnswer)));
-
-        } catch (Exception e) {
-            logger.error("对话失败", e);
-            return ResponseEntity.ok(ApiResponse.success(ChatResponse.error(e.getMessage())));
+        if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "问题内容不能为空");
         }
+
+        SessionInfo session = getOrCreateSession(request.getId());
+            
+        List<Map<String, String>> history = session.getHistory();
+        logger.info("会话历史消息对数: {}", history.size() / 2);
+
+        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
+        DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+
+        chatService.logAvailableTools();
+
+        logger.info("开始 ReactAgent 对话（支持自动工具调用）");
+        String systemPrompt = chatService.buildSystemPrompt(history);
+        ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
+        String fullAnswer = chatService.executeChat(agent, request.getQuestion());
+        session.addMessage(request.getQuestion(), fullAnswer);
+        logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}",
+                request.getId(), session.getMessagePairCount());
+        return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(fullAnswer)));
     }
 
     /**
@@ -115,25 +100,18 @@ public class ChatController {
      */
     @PostMapping("/chat/clear")
     public ResponseEntity<ApiResponse<String>> clearChatHistory(@RequestBody ClearRequest request) {
-        try {
-            logger.info("收到清空会话历史请求 - SessionId: {}", request.getId());
+        logger.info("收到清空会话历史请求 - SessionId: {}", request.getId());
 
-            if (request.getId() == null || request.getId().isEmpty()) {
-                return ResponseEntity.ok(ApiResponse.error("会话ID不能为空"));
-            }
-
-            SessionInfo session = sessions.get(request.getId());
-            if (session != null) {
-                session.clearHistory();
-                return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
-            } else {
-                return ResponseEntity.ok(ApiResponse.error("会话不存在"));
-            }
-
-        } catch (Exception e) {
-            logger.error("清空会话历史失败", e);
-            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+        if (request.getId() == null || request.getId().isEmpty()) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "会话ID不能为空");
         }
+
+        SessionInfo session = sessions.get(request.getId());
+        if (session == null) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "会话不存在");
+        }
+        session.clearHistory();
+        return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
     }
 
     /**
@@ -148,10 +126,10 @@ public class ChatController {
         if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
             logger.warn("问题内容为空");
             try {
-                emitter.send(SseEmitter.event().name("message").data(SseMessage.error("问题内容不能为空"), MediaType.APPLICATION_JSON));
+                sendSseError(emitter, new BusinessException(ErrorCode.INVALID_REQUEST, "问题内容不能为空"));
                 emitter.complete();
             } catch (IOException e) {
-                emitter.completeWithError(e);
+                emitter.complete();
             }
             return emitter;
         }
@@ -231,11 +209,11 @@ public class ChatController {
                         try {
                             emitter.send(SseEmitter.event()
                                     .name("message")
-                                    .data(SseMessage.error(error.getMessage()), MediaType.APPLICATION_JSON));
+                                    .data(SseMessage.error(toApiError(error)), MediaType.APPLICATION_JSON));
                         } catch (IOException ex) {
                             logger.error("发送错误消息失败", ex);
                         }
-                        emitter.completeWithError(error);
+                        emitter.complete();
                     },
                     () -> {
                         // 完成处理
@@ -266,11 +244,11 @@ public class ChatController {
                 try {
                     emitter.send(SseEmitter.event()
                             .name("message")
-                            .data(SseMessage.error(e.getMessage()), MediaType.APPLICATION_JSON));
+                            .data(SseMessage.error(toApiError(e)), MediaType.APPLICATION_JSON));
                 } catch (IOException ex) {
                     logger.error("发送错误消息失败", ex);
                 }
-                emitter.completeWithError(e);
+                emitter.complete();
             }
         });
 
@@ -309,7 +287,8 @@ public class ChatController {
 
                 if (overAllStateOptional.isEmpty()) {
                     emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
+                            .data(SseMessage.error(ApiError.of(ErrorCode.BUSINESS_ERROR,
+                                    "多 Agent 编排未获取到有效结果")), MediaType.APPLICATION_JSON));
                     emitter.complete();
                     return;
                 }
@@ -361,11 +340,11 @@ public class ChatController {
                 logger.error("AI Ops 多 Agent 协作失败", e);
                 try {
                     emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.error("AI Ops 流程失败: " + e.getMessage()), MediaType.APPLICATION_JSON));
+                            .data(SseMessage.error(toApiError(e)), MediaType.APPLICATION_JSON));
                 } catch (IOException ex) {
                     logger.error("发送错误消息失败", ex);
                 }
-                emitter.completeWithError(e);
+                emitter.complete();
             }
         });
 
@@ -378,24 +357,17 @@ public class ChatController {
      */
     @GetMapping("/chat/session/{sessionId}")
     public ResponseEntity<ApiResponse<SessionInfoResponse>> getSessionInfo(@PathVariable String sessionId) {
-        try {
-            logger.info("收到获取会话信息请求 - SessionId: {}", sessionId);
+        logger.info("收到获取会话信息请求 - SessionId: {}", sessionId);
 
-            SessionInfo session = sessions.get(sessionId);
-            if (session != null) {
-                SessionInfoResponse response = new SessionInfoResponse();
-                response.setSessionId(sessionId);
-                response.setMessagePairCount(session.getMessagePairCount());
-                response.setCreateTime(session.createTime);
-                return ResponseEntity.ok(ApiResponse.success(response));
-            } else {
-                return ResponseEntity.ok(ApiResponse.error("会话不存在"));
-            }
-
-        } catch (Exception e) {
-            logger.error("获取会话信息失败", e);
-            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+        SessionInfo session = sessions.get(sessionId);
+        if (session == null) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "会话不存在");
         }
+        SessionInfoResponse response = new SessionInfoResponse();
+        response.setSessionId(sessionId);
+        response.setMessagePairCount(session.getMessagePairCount());
+        response.setCreateTime(session.createTime);
+        return ResponseEntity.ok(ApiResponse.success(response));
     }
 
     // ==================== 辅助方法 ====================
@@ -405,6 +377,19 @@ public class ChatController {
             sessionId = UUID.randomUUID().toString();
         }
         return sessions.computeIfAbsent(sessionId, SessionInfo::new);
+    }
+
+    private ApiError toApiError(Throwable error) {
+        if (error instanceof AppException appException) {
+            return ApiError.of(appException.getErrorCode(), appException.getMessage());
+        }
+        logger.error("SSE request failed", error);
+        return ApiError.of(ErrorCode.MODEL_UNAVAILABLE);
+    }
+
+    private void sendSseError(SseEmitter emitter, Throwable error) throws IOException {
+        emitter.send(SseEmitter.event().name("message")
+                .data(SseMessage.error(toApiError(error)), MediaType.APPLICATION_JSON));
     }
 
     // ==================== 内部类 ====================
@@ -570,60 +555,4 @@ public class ChatController {
         }
     }
 
-    /**
-     * 统一 SSE 流式消息格式
-     * 适用于所有 SSE 流式返回模式的对话接口
-     */
-    @Setter
-    @Getter
-    public static class SseMessage {
-        private String type;  // content: 内容块, error: 错误, done: 完成
-        private String data;
-
-        public static SseMessage content(String data) {
-            SseMessage message = new SseMessage();
-            message.setType("content");
-            message.setData(data);
-            return message;
-        }
-
-        public static SseMessage error(String errorMessage) {
-            SseMessage message = new SseMessage();
-            message.setType("error");
-            message.setData(errorMessage);
-            return message;
-        }
-
-        public static SseMessage done() {
-            SseMessage message = new SseMessage();
-            message.setType("done");
-            message.setData(null);
-            return message;
-        }
-    }
-
-
-    @Getter
-    @Setter
-    public static class ApiResponse<T> {
-        private int code;
-        private String message;
-        private T data;
-
-        public static <T> ApiResponse<T> success(T data) {
-            ApiResponse<T> response = new ApiResponse<>();
-            response.setCode(200);
-            response.setMessage("success");
-            response.setData(data);
-            return response;
-        }
-
-        public static <T> ApiResponse<T> error(String message) {
-            ApiResponse<T> response = new ApiResponse<>();
-            response.setCode(500);
-            response.setMessage(message);
-            return response;
-        }
-
-    }
 }

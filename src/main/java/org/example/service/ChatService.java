@@ -9,6 +9,8 @@ import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
+import org.example.common.exception.ErrorCode;
+import org.example.common.exception.ExternalServiceException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -170,11 +172,15 @@ public class ChatService {
      * @param question 用户问题
      * @return AI 回复
      */
-    public String executeChat(ReactAgent agent, String question) throws GraphRunnerException {
+    public String executeChat(ReactAgent agent, String question) {
         logger.info("执行 ReactAgent.call() - 自动处理工具调用");
-        var response = agent.call(question);
-        String answer = response.getText();
-        logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
-        return answer;
+        try {
+            var response = agent.call(question);
+            String answer = response.getText();
+            logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
+            return answer;
+        } catch (GraphRunnerException e) {
+            throw new ExternalServiceException(ErrorCode.MODEL_UNAVAILABLE, e);
+        }
     }
 }
