@@ -11,12 +11,15 @@ import lombok.Getter;
 import lombok.Setter;
 import org.example.common.api.ApiError;
 import org.example.common.api.ApiResponse;
+import org.example.common.api.ChatSessionContext;
 import org.example.common.api.SseMessage;
+import org.example.common.api.TraceIdContext;
 import org.example.common.exception.AppException;
 import org.example.common.exception.BusinessException;
 import org.example.common.exception.ErrorCode;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
+import org.example.service.ChatSessionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -30,10 +33,8 @@ import reactor.core.publisher.Flux;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 统一 API 控制器
@@ -52,15 +53,12 @@ public class ChatController {
     private ChatService chatService;
 
     @Autowired
+    private ChatSessionService chatSessionService;
+
+    @Autowired
     private ToolCallbackProvider tools;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
-
-    // 存储会话信息
-    private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
-    
-    // 最大历史消息窗口大小（成对计算：用户消息+AI回复=1对）
-    private static final int MAX_WINDOW_SIZE = 6;
 
     /**
      * 普通对话接口（支持工具调用）
@@ -74,10 +72,12 @@ public class ChatController {
             throw new BusinessException(ErrorCode.INVALID_REQUEST, "问题内容不能为空");
         }
 
-        SessionInfo session = getOrCreateSession(request.getId());
-            
-        List<Map<String, String>> history = session.getHistory();
+        String sessionId = chatSessionService.getOrCreateSession(request.getId());
+        List<Map<String, String>> history = chatSessionService.loadHistory(sessionId);
         logger.info("会话历史消息对数: {}", history.size() / 2);
+
+        ChatSessionContext.set(sessionId);
+        try {
 
         DashScopeApi dashScopeApi = chatService.createDashScopeApi();
         DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
@@ -88,10 +88,12 @@ public class ChatController {
         String systemPrompt = chatService.buildSystemPrompt(history);
         ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
         String fullAnswer = chatService.executeChat(agent, request.getQuestion());
-        session.addMessage(request.getQuestion(), fullAnswer);
-        logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}",
-                request.getId(), session.getMessagePairCount());
-        return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(fullAnswer)));
+        chatSessionService.saveTurn(sessionId, request.getQuestion(), fullAnswer, TraceIdContext.getOrCreate());
+        logger.info("已更新会话历史 - SessionId: {}", sessionId);
+            return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(fullAnswer)));
+        } finally {
+            ChatSessionContext.clear();
+        }
     }
 
     /**
@@ -105,11 +107,10 @@ public class ChatController {
             throw new BusinessException(ErrorCode.INVALID_REQUEST, "会话ID不能为空");
         }
 
-        SessionInfo session = sessions.get(request.getId());
-        if (session == null) {
+        if (chatSessionService.findSession(request.getId()).isEmpty()) {
             throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "会话不存在");
         }
-        session.clearHistory();
+        chatSessionService.clear(request.getId());
         return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
     }
 
@@ -120,6 +121,7 @@ public class ChatController {
     @PostMapping(value = "/chat_stream", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter chatStream(@RequestBody ChatRequest request) {
         SseEmitter emitter = new SseEmitter(300000L); // 5分钟超时
+        String traceId = TraceIdContext.getOrCreate();
 
         // 参数校验
         if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
@@ -137,11 +139,9 @@ public class ChatController {
             try {
                 logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
 
-                // 获取或创建会话
-                SessionInfo session = getOrCreateSession(request.getId());
-                
-                // 获取历史消息
-                List<Map<String, String>> history = session.getHistory();
+                String sessionId = chatSessionService.getOrCreateSession(request.getId());
+                List<Map<String, String>> history = chatSessionService.loadHistory(sessionId);
+                ChatSessionContext.set(sessionId);
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
                 // 创建 DashScope API 和 ChatModel
@@ -213,24 +213,24 @@ public class ChatController {
                             logger.error("发送错误消息失败", ex);
                         }
                         emitter.complete();
+                        ChatSessionContext.clear();
                     },
                     () -> {
                         // 完成处理
                         try {
                             String fullAnswer = fullAnswerBuilder.toString();
-                            logger.info("ReactAgent 流式对话完成 - SessionId: {}, 答案长度: {}", 
-                                request.getId(), fullAnswer.length());
+                            logger.info("ReactAgent 流式对话完成 - SessionId: {}, 答案长度: {}",
+                                sessionId, fullAnswer.length());
                             
-                            // 更新会话历史
-                            session.addMessage(request.getQuestion(), fullAnswer);
-                            logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
-                                request.getId(), session.getMessagePairCount());
+                            chatSessionService.saveTurn(sessionId, request.getQuestion(), fullAnswer, traceId);
+                            logger.info("已更新会话历史 - SessionId: {}", sessionId);
                             
                             // 发送完成标记
                             emitter.send(SseEmitter.event()
                                     .name("message")
                                     .data(SseMessage.done(), MediaType.APPLICATION_JSON));
                             emitter.complete();
+                            ChatSessionContext.clear();
                         } catch (IOException e) {
                             logger.error("发送完成消息失败", e);
                             emitter.completeWithError(e);
@@ -248,6 +248,7 @@ public class ChatController {
                     logger.error("发送错误消息失败", ex);
                 }
                 emitter.complete();
+                ChatSessionContext.clear();
             }
         });
 
@@ -350,24 +351,15 @@ public class ChatController {
     public ResponseEntity<ApiResponse<SessionInfoResponse>> getSessionInfo(@PathVariable String sessionId) {
         logger.info("收到获取会话信息请求 - SessionId: {}", sessionId);
 
-        SessionInfo session = sessions.get(sessionId);
-        if (session == null) {
+        Optional<ChatSessionService.SessionDetails> session = chatSessionService.findSession(sessionId);
+        if (session.isEmpty()) {
             throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "会话不存在");
         }
         SessionInfoResponse response = new SessionInfoResponse();
         response.setSessionId(sessionId);
-        response.setMessagePairCount(session.getMessagePairCount());
-        response.setCreateTime(session.createTime);
+        response.setMessagePairCount(session.get().messagePairCount());
+        response.setCreateTime(session.get().createTime());
         return ResponseEntity.ok(ApiResponse.success(response));
-    }
-
-    // ==================== 辅助方法 ====================
-
-    private SessionInfo getOrCreateSession(String sessionId) {
-        if (sessionId == null || sessionId.isEmpty()) {
-            sessionId = UUID.randomUUID().toString();
-        }
-        return sessions.computeIfAbsent(sessionId, SessionInfo::new);
     }
 
     private ApiError toApiError(Throwable error) {
@@ -384,101 +376,6 @@ public class ChatController {
     }
 
     // ==================== 内部类 ====================
-
-    /**
-     * 会话信息
-     * 管理单个会话的历史消息，支持自动清理和线程安全
-     */
-    private static class SessionInfo {
-        private final String sessionId;
-        // 存储历史消息对：[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-        private final List<Map<String, String>> messageHistory;
-        private final long createTime;
-        private final ReentrantLock lock;
-
-        public SessionInfo(String sessionId) {
-            this.sessionId = sessionId;
-            this.messageHistory = new ArrayList<>();
-            this.createTime = System.currentTimeMillis();
-            this.lock = new ReentrantLock();
-        }
-
-        /**
-         * 添加一对消息（用户问题 + AI回复）
-         * 自动管理历史消息窗口大小
-         */
-        public void addMessage(String userQuestion, String aiAnswer) {
-            lock.lock();
-            try {
-                // 添加用户消息
-                Map<String, String> userMsg = new HashMap<>();
-                userMsg.put("role", "user");
-                userMsg.put("content", userQuestion);
-                messageHistory.add(userMsg);
-
-                // 添加AI回复
-                Map<String, String> assistantMsg = new HashMap<>();
-                assistantMsg.put("role", "assistant");
-                assistantMsg.put("content", aiAnswer);
-                messageHistory.add(assistantMsg);
-
-                // 自动清理：保持最多 MAX_WINDOW_SIZE 对消息
-                // 每对消息包含2条记录（user + assistant）
-                int maxMessages = MAX_WINDOW_SIZE * 2;
-                while (messageHistory.size() > maxMessages) {
-                    // 成对删除最旧的消息（删除前2条）
-                    messageHistory.remove(0); // 删除最旧的用户消息
-                    if (!messageHistory.isEmpty()) {
-                        messageHistory.remove(0); // 删除对应的AI回复
-                    }
-                }
-
-                logger.debug("会话 {} 更新历史消息，当前消息对数: {}", 
-                    sessionId, messageHistory.size() / 2);
-
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /**
-         * 获取历史消息（线程安全）
-         * 返回副本以避免并发修改
-         */
-        public List<Map<String, String>> getHistory() {
-            lock.lock();
-            try {
-                return new ArrayList<>(messageHistory);
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /**
-         * 清空历史消息
-         */
-        public void clearHistory() {
-            lock.lock();
-            try {
-                messageHistory.clear();
-                logger.info("会话 {} 历史消息已清空", sessionId);
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /**
-         * 获取当前消息对数
-         */
-        public int getMessagePairCount() {
-            lock.lock();
-            try {
-                return messageHistory.size() / 2;
-            } finally {
-                lock.unlock();
-            }
-        }
-    }
 
     /**
      * 聊天请求

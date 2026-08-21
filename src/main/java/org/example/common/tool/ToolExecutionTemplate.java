@@ -15,12 +15,19 @@ public class ToolExecutionTemplate {
     private static final Logger logger = LoggerFactory.getLogger(ToolExecutionTemplate.class);
 
     private final ToolRegistry toolRegistry;
+    private final ToolInvocationAuditService toolInvocationAuditService;
 
-    public ToolExecutionTemplate(ToolRegistry toolRegistry) {
+    public ToolExecutionTemplate(ToolRegistry toolRegistry, ToolInvocationAuditService toolInvocationAuditService) {
         this.toolRegistry = toolRegistry;
+        this.toolInvocationAuditService = toolInvocationAuditService;
     }
 
     public <T> ToolResult<T> execute(String toolName, ThrowingSupplier<T> action,
+            Function<Exception, ApiError> errorMapper) {
+        return execute(toolName, null, action, errorMapper);
+    }
+
+    public <T> ToolResult<T> execute(String toolName, String requestSummary, ThrowingSupplier<T> action,
             Function<Exception, ApiError> errorMapper) {
         ToolRegistry.ToolDescriptor descriptor = toolRegistry.find(toolName).orElse(null);
         if (descriptor == null) {
@@ -31,26 +38,36 @@ public class ToolExecutionTemplate {
         }
         ToolRetryProperties.RetryPolicy policy = descriptor.getRetryPolicy();
         int maxAttempts = Math.max(1, policy.getMaxAttempts());
+        String invocationId = toolInvocationAuditService.start(toolName, descriptor, requestSummary);
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            long attemptId = toolInvocationAuditService.startAttempt(invocationId, attempt, requestSummary);
             try {
                 T data = action.get();
                 logger.info("tool invocation succeeded, tool={}, traceId={}, attempts={}", toolName,
                         TraceIdContext.getOrCreate(), attempt);
-                return ToolResult.success(data, "工具调用成功", attempt);
+                ToolResult<T> result = ToolResult.success(data, "工具调用成功", attempt);
+                toolInvocationAuditService.succeedAttempt(invocationId, attemptId, data);
+                toolInvocationAuditService.complete(invocationId, result);
+                return result;
             } catch (Exception exception) {
                 ApiError error = errorMapper.apply(exception);
+                toolInvocationAuditService.failAttempt(invocationId, attemptId, error);
                 if (!error.isRetryable() || attempt == maxAttempts) {
                     logger.warn("tool invocation failed permanently, tool={}, traceId={}, attempts={}, errorCode={}",
                             toolName, error.getTraceId(), attempt, error.getCode(), exception);
-                    return ToolResult.failure(error, attempt);
+                    ToolResult<T> result = ToolResult.failure(error, attempt);
+                    toolInvocationAuditService.complete(invocationId, result);
+                    return result;
                 }
 
                 long delayMs = calculateDelay(policy, attempt);
                 logger.warn("tool invocation failed, retrying, tool={}, traceId={}, attempt={}/{}, delayMs={}, errorCode={}",
                         toolName, error.getTraceId(), attempt, maxAttempts, delayMs, error.getCode(), exception);
                 if (!sleep(delayMs)) {
-                    return ToolResult.failure(error, attempt);
+                    ToolResult<T> result = ToolResult.failure(error, attempt);
+                    toolInvocationAuditService.complete(invocationId, result);
+                    return result;
                 }
             }
         }
