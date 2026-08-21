@@ -1,63 +1,142 @@
 package org.example.common.tool;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.common.api.ApiError;
 import org.example.common.api.ChatSessionContext;
 import org.example.common.api.TraceIdContext;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.example.entity.ToolInvocationAttemptEntity;
+import org.example.entity.ToolInvocationEntity;
+import org.example.mapper.ToolInvocationAttemptMapper;
+import org.example.mapper.ToolInvocationMapper;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
 
+/**
+ * 工具调用审计持久化服务。
+ */
 @Service
 public class ToolInvocationAuditService {
     private static final int SUMMARY_MAX_LENGTH = 8_000;
-    private final JdbcTemplate jdbcTemplate;
+    private static final String RUNNING_STATUS = "RUNNING";
+    private static final String SUCCESS_STATUS = "SUCCESS";
+    private static final String FAILED_STATUS = "FAILED";
+
+    private final ToolInvocationMapper toolInvocationMapper;
+    private final ToolInvocationAttemptMapper toolInvocationAttemptMapper;
     private final ObjectMapper objectMapper;
 
-    public ToolInvocationAuditService(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
-        this.jdbcTemplate = jdbcTemplate;
+    public ToolInvocationAuditService(ToolInvocationMapper toolInvocationMapper,
+            ToolInvocationAttemptMapper toolInvocationAttemptMapper, ObjectMapper objectMapper) {
+        this.toolInvocationMapper = toolInvocationMapper;
+        this.toolInvocationAttemptMapper = toolInvocationAttemptMapper;
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 创建工具逻辑调用审计记录。
+     *
+     * @param toolName 工具名称
+     * @param descriptor 工具描述
+     * @param requestSummary 请求摘要
+     * @return 工具调用标识
+     */
     public String start(String toolName, ToolRegistry.ToolDescriptor descriptor, String requestSummary) {
         String invocationId = UUID.randomUUID().toString();
-        jdbcTemplate.update("INSERT INTO tool_invocation " +
-                        "(invocation_id, trace_id, session_id, tool_name, tool_source, status, started_at, request_summary) " +
-                        "VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)",
-                invocationId, TraceIdContext.getOrCreate(), ChatSessionContext.get(), toolName, descriptor.getSource().name(),
-                LocalDateTime.now(), truncate(requestSummary));
+        ToolInvocationEntity invocation = new ToolInvocationEntity();
+        invocation.setInvocationId(invocationId);
+        invocation.setTraceId(TraceIdContext.getOrCreate());
+        invocation.setSessionId(ChatSessionContext.get());
+        invocation.setToolName(toolName);
+        invocation.setToolSource(descriptor.getSource().name());
+        invocation.setStatus(RUNNING_STATUS);
+        invocation.setStartedAt(LocalDateTime.now());
+        invocation.setRequestSummary(truncate(requestSummary));
+        assertAffectedRows(toolInvocationMapper.insert(invocation), "创建工具调用审计记录失败");
         return invocationId;
     }
 
+    /**
+     * 创建一次工具执行尝试记录。
+     *
+     * @param invocationId 工具调用标识
+     * @param attempt 尝试序号
+     * @param requestSummary 请求摘要
+     * @return 尝试序号
+     */
     public long startAttempt(String invocationId, int attempt, String requestSummary) {
-        jdbcTemplate.update("INSERT INTO tool_invocation_attempt " +
-                        "(invocation_id, attempt_no, status, started_at, request_summary) VALUES (?, ?, 'RUNNING', ?, ?)",
-                invocationId, attempt, LocalDateTime.now(), truncate(requestSummary));
+        ToolInvocationAttemptEntity invocationAttempt = new ToolInvocationAttemptEntity();
+        invocationAttempt.setInvocationId(invocationId);
+        invocationAttempt.setAttemptNo(attempt);
+        invocationAttempt.setStatus(RUNNING_STATUS);
+        invocationAttempt.setStartedAt(LocalDateTime.now());
+        invocationAttempt.setRequestSummary(truncate(requestSummary));
+        assertAffectedRows(toolInvocationAttemptMapper.insert(invocationAttempt), "创建工具尝试审计记录失败");
         return attempt;
     }
 
+    /**
+     * 标记一次工具尝试成功。
+     *
+     * @param invocationId 工具调用标识
+     * @param attempt 尝试序号
+     * @param result 工具返回结果
+     */
     public void succeedAttempt(String invocationId, long attempt, Object result) {
-        String response = toSummary(result);
-        jdbcTemplate.update("UPDATE tool_invocation_attempt SET status = 'SUCCESS', finished_at = ?, response_summary = ? " +
-                "WHERE invocation_id = ? AND attempt_no = ?", LocalDateTime.now(), response, invocationId, attempt);
+        assertAffectedRows(toolInvocationAttemptMapper.update(null,
+                new LambdaUpdateWrapper<ToolInvocationAttemptEntity>()
+                        .eq(ToolInvocationAttemptEntity::getInvocationId, invocationId)
+                        .eq(ToolInvocationAttemptEntity::getAttemptNo, attempt)
+                        .set(ToolInvocationAttemptEntity::getStatus, SUCCESS_STATUS)
+                        .set(ToolInvocationAttemptEntity::getFinishedAt, LocalDateTime.now())
+                        .set(ToolInvocationAttemptEntity::getResponseSummary, toSummary(result))), "更新工具尝试成功状态失败");
     }
 
+    /**
+     * 标记一次工具尝试失败。
+     *
+     * @param invocationId 工具调用标识
+     * @param attempt 尝试序号
+     * @param error 工具错误信息
+     */
     public void failAttempt(String invocationId, long attempt, ApiError error) {
-        jdbcTemplate.update("UPDATE tool_invocation_attempt SET status = 'FAILED', finished_at = ?, error_code = ?, " +
-                        "error_message = ?, retryable = ? WHERE invocation_id = ? AND attempt_no = ?",
-                LocalDateTime.now(), error.getCode(), truncate(error.getMessage()), error.isRetryable(), invocationId, attempt);
+        assertAffectedRows(toolInvocationAttemptMapper.update(null,
+                new LambdaUpdateWrapper<ToolInvocationAttemptEntity>()
+                        .eq(ToolInvocationAttemptEntity::getInvocationId, invocationId)
+                        .eq(ToolInvocationAttemptEntity::getAttemptNo, attempt)
+                        .set(ToolInvocationAttemptEntity::getStatus, FAILED_STATUS)
+                        .set(ToolInvocationAttemptEntity::getFinishedAt, LocalDateTime.now())
+                        .set(ToolInvocationAttemptEntity::getErrorCode, error.getCode())
+                        .set(ToolInvocationAttemptEntity::getErrorMessage, truncate(error.getMessage()))
+                        .set(ToolInvocationAttemptEntity::getRetryable, error.isRetryable())), "更新工具尝试失败状态失败");
     }
 
+    /**
+     * 标记工具逻辑调用结束。
+     *
+     * @param invocationId 工具调用标识
+     * @param result 工具执行结果
+     */
     public void complete(String invocationId, ToolResult<?> result) {
         ApiError error = result.getError();
-        jdbcTemplate.update("UPDATE tool_invocation SET status = ?, finished_at = ?, attempt_count = ?, error_code = ?, " +
-                        "error_message = ?, result_summary = ? WHERE invocation_id = ?",
-                result.isSuccess() ? "SUCCESS" : "FAILED", LocalDateTime.now(), result.getAttempts(),
-                error == null ? null : error.getCode(), error == null ? null : truncate(error.getMessage()),
-                result.isSuccess() ? toSummary(result.getData()) : null, invocationId);
+        assertAffectedRows(toolInvocationMapper.update(null, new LambdaUpdateWrapper<ToolInvocationEntity>()
+                .eq(ToolInvocationEntity::getInvocationId, invocationId)
+                .set(ToolInvocationEntity::getStatus, result.isSuccess() ? SUCCESS_STATUS : FAILED_STATUS)
+                .set(ToolInvocationEntity::getFinishedAt, LocalDateTime.now())
+                .set(ToolInvocationEntity::getAttemptCount, result.getAttempts())
+                .set(ToolInvocationEntity::getErrorCode, error == null ? null : error.getCode())
+                .set(ToolInvocationEntity::getErrorMessage, error == null ? null : truncate(error.getMessage()))
+                .set(ToolInvocationEntity::getResultSummary, result.isSuccess() ? toSummary(result.getData()) : null)),
+                "更新工具调用结束状态失败");
+    }
+
+    private void assertAffectedRows(int affectedRows, String errorMessage) {
+        if (affectedRows != 1) {
+            throw new IllegalStateException(errorMessage);
+        }
     }
 
     private String toSummary(Object value) {
