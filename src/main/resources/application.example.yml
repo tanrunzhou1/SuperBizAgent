@@ -21,6 +21,11 @@ milvus:
 
 # Spring AI Alibaba DashScope 配置
 spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/super_biz_agent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: root
+    password: xxx
+    driver-class-name: com.mysql.cj.jdbc.Driver
   ai:
     dashscope:
       api-key: sk-xxx  # 从环境变量读取或使用默认值
@@ -76,3 +81,25 @@ prometheus:
 # CLS 云日志服务配置
 cls:
   mock-enabled: true  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
+
+tool:
+  registry:
+    enabled:
+      - getCurrentDateTime
+      - queryInternalDocs
+      - queryPrometheusAlerts
+      - getAvailableLogTopics
+      - queryLogs
+  retry:
+    defaults:
+      max-attempts: 3
+      initial-interval-ms: 500
+      multiplier: 2.0
+      max-interval-ms: 3000
+    policies:
+      queryPrometheusAlerts:
+        max-attempts: 3
+        initial-interval-ms: 500
+      queryInternalDocs:
+        max-attempts: 2
+        initial-interval-ms: 300
