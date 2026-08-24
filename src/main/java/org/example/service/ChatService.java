@@ -49,6 +49,9 @@ public class ChatService {
     @Value("${spring.ai.dashscope.api-key}")
     private String dashScopeApiKey;
 
+    @Value("${spring.ai.dashscope.chat.options.model:qwen-plus}")
+    private String chatModelName;
+
     /**
      * 创建 DashScope API 实例
      */
@@ -68,7 +71,7 @@ public class ChatService {
         return DashScopeChatModel.builder()
                 .dashScopeApi(dashScopeApi)
                 .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
+                        .withModel(chatModelName)
                         .withTemperature(temperature)
                         .withMaxToken(maxToken)
                         .withTopP(topP)
