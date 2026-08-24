@@ -31,7 +31,8 @@ spring:
       api-key: sk-xxx  # 从环境变量读取或使用默认值
       chat:
         options:
-          model: qwen-plus  # 聊天、流式聊天和 AI Ops 使用的 DashScope 模型
+          model: qwen3.7-plus  # 聊天、流式聊天和 AI Ops 使用的 DashScope 模型
+          multi-model: true # glm-5.2 false  qwen3.7-plus true
           timeout: 180000  # 超时时间180秒（3分钟）
       retry:
         max-attempts: 3  # 最大重试次数

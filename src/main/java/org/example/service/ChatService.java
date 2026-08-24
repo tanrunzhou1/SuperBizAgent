@@ -19,6 +19,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import static com.alibaba.cloud.ai.dashscope.common.DashScopeApiConstants.MULTIMODAL_GENERATION_RESTFUL_URL;
+
 import java.util.List;
 import java.util.Map;
 
@@ -52,13 +54,23 @@ public class ChatService {
     @Value("${spring.ai.dashscope.chat.options.model:qwen-plus}")
     private String chatModelName;
 
+    @Value("${spring.ai.dashscope.chat.options.multi-model:false}")
+    private boolean multiModel;
+
     /**
      * 创建 DashScope API 实例
      */
     public DashScopeApi createDashScopeApi() {
-        return DashScopeApi.builder()
-                .apiKey(dashScopeApiKey)
-                .build();
+        DashScopeApi.Builder builder = DashScopeApi.builder()
+                .apiKey(dashScopeApiKey);
+
+        // ReactAgent 注册工具后，当前 Spring AI Alibaba 版本可能在选项合并时
+        // 将 multiModel=true 覆盖为 false。显式设置端点以保证多模态模型走正确路径。
+        if (multiModel) {
+            builder.completionsPath(MULTIMODAL_GENERATION_RESTFUL_URL);
+        }
+
+        return builder.build();
     }
 
     /**
@@ -68,10 +80,12 @@ public class ChatService {
      * @param topP 核采样参数
      */
     public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi, double temperature, int maxToken, double topP) {
+        logger.info("创建 DashScope ChatModel: model={}, multiModel={}", chatModelName, multiModel);
         return DashScopeChatModel.builder()
                 .dashScopeApi(dashScopeApi)
                 .defaultOptions(DashScopeChatOptions.builder()
                         .withModel(chatModelName)
+                        .multiModel(multiModel)
                         .withTemperature(temperature)
                         .withMaxToken(maxToken)
                         .withTopP(topP)
