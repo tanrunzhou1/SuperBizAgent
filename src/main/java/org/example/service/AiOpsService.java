@@ -9,6 +9,7 @@ import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
+import org.example.common.aiops.AiOpsRunContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -49,6 +50,15 @@ public class AiOpsService {
      * @throws GraphRunnerException 如果 Agent 执行失败
      */
     public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks) throws GraphRunnerException {
+        return executeAiOpsAnalysis(chatModel, toolCallbacks,
+                AiOpsRunContext.live("请读取当前活跃告警并执行故障分析。"));
+    }
+
+    /**
+     * 使用统一运行上下文执行 AI Ops 分析。旧方法保留用于兼容已有调用方。
+     */
+    public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel,
+            ToolCallback[] toolCallbacks, AiOpsRunContext runContext) throws GraphRunnerException {
         logger.info("开始执行 AI Ops 多 Agent 协作流程");
 
         // 构建 Planner 和 Executor Agent
@@ -64,7 +74,9 @@ public class AiOpsService {
                 .subAgents(List.of(plannerAgent, executorAgent))
                 .build();
 
-        String taskPrompt = "你是企业级 SRE，接到了自动化告警排查任务。请结合工具调用，执行**规划→执行→再规划**的闭环，并最终按照固定模板输出《告警分析报告》。禁止编造虚假数据，如连续多次查询失败需诚实反馈无法完成的原因。";
+        String taskPrompt = runContext == null
+                ? AiOpsRunContext.live("请读取当前活跃告警并执行故障分析。").taskPrompt()
+                : runContext.taskPrompt();
 
         logger.info("调用 Supervisor Agent 开始编排...");
         return supervisorAgent.invoke(taskPrompt);
@@ -153,9 +165,9 @@ public class AiOpsService {
                 ## 最终报告输出要求（CRITICAL）
                 
                 当 decision=FINISH 时，你必须：
-                1. **不要输出 JSON 格式**
-                2. **直接输出完整的 Markdown 格式报告文本**
-                3. **报告必须严格遵循以下模板**：
+                1. **最终只输出结构化 JSON，Markdown 报告由服务端渲染**
+                2. **JSON 必须包含 faultObject、rootCause、confidence、impact、keyEvidence、recommendedActions**
+                3. **以下模板仅用于说明报告内容，最终不得直接输出 Markdown**：
                 
                 ```
                 # 告警分析报告
@@ -226,11 +238,21 @@ public class AiOpsService {
                 ```
                 
                 **重要提醒**：
-                - 最终输出必须是纯 Markdown 文本，不要包含 JSON 结构
-                - 不要使用 "finalReport": "..." 这样的格式
-                - 直接从 "# 告警分析报告" 开始输出
+                - 最终输出必须是单个 JSON 对象，不要输出 Markdown 代码围栏或额外解释
+                - 服务端会根据 JSON 生成面向运维人员的 Markdown 报告
                 - 所有内容必须基于工具查询的真实数据，严禁编造
                 - 如果某个步骤失败，在结论中如实说明，不要跳过
+
+                FINISH 输出示例：
+                {
+                  "status": "CONFIRMED",
+                  "faultObject": "app/example-service",
+                  "rootCause": "database_connection_exhaustion",
+                  "confidence": 0.85,
+                  "impact": "服务请求失败率上升",
+                  "keyEvidence": [{"toolCallId": "tool-1", "tool": "queryLogs", "finding": "连接池耗尽"}],
+                  "recommendedActions": [{"priority": "P1", "action": "检查并扩容连接池", "risk": "需要配置变更"}]
+                }
                 
                 """;
     }
@@ -266,10 +288,11 @@ public class AiOpsService {
                 1. 当需要拆解任务或重新制定策略时，调用 planner_agent。
                 2. 当 planner_agent 输出 decision=EXECUTE 时，调用 executor_agent 执行第一步。
                 3. 根据 executor_agent 的反馈，评估是否需要再次调用 planner_agent，直到 decision=FINISH。
-                4. FINISH 后，确保向最终用户输出完整的《告警分析报告》，格式必须严格为：
-                   告警分析报告\n---\n# 告警处理详情\n## 活跃告警清单\n## 告警根因分析N\n## 处理方案执行N\n## 结论。
+                4. FINISH 后，确保 Planner 输出包含 status、faultObject、rootCause、confidence、impact、keyEvidence、recommendedActions 的单个 JSON 对象；服务端负责生成《告警分析报告》。
                 5. 若步骤涉及腾讯云日志/主题工具，请确保使用连字符区域 ID（ap-guangzhou 等），或省略 region 以采用默认值。
                 6. 如果 Executor 返回工具 success=false，必须停止该工具的同参数重复调用，改用其他证据源；若关键证据均不可用，直接输出"任务无法完成"的报告，明确列出 error code、attempts 和 traceId，严禁凭空编造结果。
+
+                最终 JSON 不得使用 Markdown 代码围栏，也不得附带 JSON 之外的解释文本。
 
                 只允许在 planner_agent、executor_agent 与 FINISH 之间做出选择。
 
