@@ -84,6 +84,10 @@ prometheus:
 cls:
   mock-enabled: true  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
 
+aiops:
+  evaluation:
+    dataset-root: ../Cloud-OpsBench/benchmark
+
 tool:
   registry:
     enabled:

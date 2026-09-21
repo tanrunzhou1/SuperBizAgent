@@ -266,7 +266,7 @@ public class ChatController {
     }
 
     /**
-     * 测评接口骨架。REPLAY 工具提供者将在第二期接入 Cloud-OpsBench。
+     * 单案例测评接口。当前从 Cloud-OpsBench 冻结快照执行一个 caseId。
      */
     @PostMapping(value = "/ai-ops/evaluations", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter evaluateAiOps(@RequestBody AIOpsRequest request) {

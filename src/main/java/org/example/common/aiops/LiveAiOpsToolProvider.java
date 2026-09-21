@@ -5,7 +5,7 @@ import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.stereotype.Component;
 
 /**
- * 真实运行模式的工具提供者。测评回放工具将在第二期实现。
+ * 真实运行模式的工具提供者。REPLAY 模式由 ReplayAiOpsToolProvider 独立处理。
  */
 @Component
 public class LiveAiOpsToolProvider implements AiOpsToolProvider {

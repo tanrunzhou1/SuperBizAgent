@@ -62,8 +62,8 @@ public class AiOpsService {
         logger.info("开始执行 AI Ops 多 Agent 协作流程");
 
         // 构建 Planner 和 Executor Agent
-        ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks);
-        ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks);
+        ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks, runContext);
+        ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks, runContext);
 
         // 构建 Supervisor Agent
         SupervisorAgent supervisorAgent = SupervisorAgent.builder()
@@ -109,13 +109,14 @@ public class AiOpsService {
     /**
      * 构建 Planner Agent
      */
-    private ReactAgent buildPlannerAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks) {
+    private ReactAgent buildPlannerAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks,
+            AiOpsRunContext runContext) {
         return ReactAgent.builder()
                 .name("planner_agent")
                 .description("负责拆解告警、规划与再规划步骤")
                 .model(chatModel)
                 .systemPrompt(buildPlannerPrompt())
-                .methodTools(buildMethodToolsArray())
+                .methodTools(buildMethodToolsArray(runContext))
                 .tools(toolCallbacks)
                 .outputKey("planner_plan")
                 .build();
@@ -124,13 +125,14 @@ public class AiOpsService {
     /**
      * 构建 Executor Agent
      */
-    private ReactAgent buildExecutorAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks) {
+    private ReactAgent buildExecutorAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks,
+            AiOpsRunContext runContext) {
         return ReactAgent.builder()
                 .name("executor_agent")
                 .description("负责执行 Planner 的首个步骤并及时反馈")
                 .model(chatModel)
                 .systemPrompt(buildExecutorPrompt())
-                .methodTools(buildMethodToolsArray())
+                .methodTools(buildMethodToolsArray(runContext))
                 .tools(toolCallbacks)
                 .outputKey("executor_feedback")
                 .build();
@@ -140,7 +142,12 @@ public class AiOpsService {
      * 动态构建方法工具数组
      * 根据 cls.mock-enabled 决定是否包含 QueryLogsTools
      */
-    private Object[] buildMethodToolsArray() {
+    private Object[] buildMethodToolsArray(AiOpsRunContext runContext) {
+        // REPLAY 只能使用 Cloud-OpsBench 的 ToolCallback，不能把任何真实
+        // Prometheus、日志或知识库工具暴露给 Agent。
+        if (runContext != null && runContext.getMode() == org.example.common.aiops.AiOpsRunMode.REPLAY) {
+            return new Object[0];
+        }
         if (queryLogsTools != null) {
             // Mock 模式：包含 QueryLogsTools
             return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools};

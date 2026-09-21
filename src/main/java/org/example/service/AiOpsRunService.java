@@ -10,7 +10,9 @@ import org.example.common.aiops.AiOpsRunMode;
 import org.example.common.aiops.AiOpsRunTrace;
 import org.example.common.aiops.AiOpsToolProvider;
 import org.example.common.aiops.DiagnosisResult;
+import org.example.common.aiops.LiveAiOpsToolProvider;
 import org.example.common.aiops.MarkdownReportRenderer;
+import org.example.common.aiops.ReplayAiOpsToolProvider;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.definition.ToolDefinition;
@@ -27,22 +29,25 @@ import java.util.UUID;
 public class AiOpsRunService {
     private final AiOpsService aiOpsService;
     private final AiOpsToolProvider liveToolProvider;
+    private final AiOpsToolProvider replayToolProvider;
     private final MarkdownReportRenderer reportRenderer;
     private final ObjectMapper objectMapper;
 
     public AiOpsRunService(AiOpsService aiOpsService,
-            AiOpsToolProvider liveToolProvider,
+            LiveAiOpsToolProvider liveToolProvider,
+            ReplayAiOpsToolProvider replayToolProvider,
             MarkdownReportRenderer reportRenderer,
             ObjectMapper objectMapper) {
         this.aiOpsService = aiOpsService;
         this.liveToolProvider = liveToolProvider;
+        this.replayToolProvider = replayToolProvider;
         this.reportRenderer = reportRenderer;
         this.objectMapper = objectMapper;
     }
 
     public AiOpsRunResult run(DashScopeChatModel chatModel, AiOpsRunContext context)
             throws Exception {
-        ToolCallback[] toolCallbacks = liveToolProvider.getToolCallbacks(context);
+        ToolCallback[] toolCallbacks = providerFor(context).getToolCallbacks(context);
         AiOpsRunTrace trace = new AiOpsRunTrace(context.getRunId());
         ToolCallback[] tracedCallbacks = wrapToolCallbacks(toolCallbacks, trace);
         Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(chatModel, tracedCallbacks, context);
@@ -54,6 +59,13 @@ public class AiOpsRunService {
         DiagnosisResult diagnosis = parseDiagnosis(context, rawReport);
         trace.setFinishedAt(java.time.Instant.now());
         return new AiOpsRunResult(context, diagnosis, reportRenderer.render(diagnosis), trace);
+    }
+
+    private AiOpsToolProvider providerFor(AiOpsRunContext context) {
+        if (context != null && context.getMode() == AiOpsRunMode.REPLAY) {
+            return replayToolProvider;
+        }
+        return liveToolProvider;
     }
 
     private ToolCallback[] wrapToolCallbacks(ToolCallback[] callbacks, AiOpsRunTrace trace) {
@@ -164,11 +176,28 @@ public class AiOpsRunService {
                     result.getRecommendedActions().add(target);
                 }
             }
+            validateDiagnosis(result);
         } catch (Exception exception) {
-            result.setStatus("UNSTRUCTURED");
+            result.setStatus("INVALID_OUTPUT");
             result.setParseError(exception.getMessage());
         }
         return result;
+    }
+
+    private void validateDiagnosis(DiagnosisResult result) {
+        if (isBlank(result.getStatus()) || isBlank(result.getFaultObject())
+                || isBlank(result.getRootCause()) || isBlank(result.getImpact())
+                || result.getConfidence() == null || result.getKeyEvidence() == null
+                || result.getRecommendedActions() == null) {
+            throw new IllegalArgumentException("结构化诊断缺少必填字段");
+        }
+        if (result.getConfidence() < 0 || result.getConfidence() > 1) {
+            throw new IllegalArgumentException("confidence 必须位于 0 到 1 之间");
+        }
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private String stripMarkdownFence(String value) {
