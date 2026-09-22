@@ -1,5 +1,14 @@
 -- SQLite schema for chat history and tool invocation audit records.
--- The script is idempotent and is executed during application startup.
+-- Initial database script. Execute this file manually before first startup.
+
+CREATE TABLE IF NOT EXISTS db_schema_version (
+    version     TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    applied_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO db_schema_version (version, description)
+VALUES ('V1', 'initial schema');
 
 CREATE TABLE IF NOT EXISTS chat_session (
     id                           INTEGER PRIMARY KEY AUTOINCREMENT,

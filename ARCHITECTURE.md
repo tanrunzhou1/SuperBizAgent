@@ -569,7 +569,8 @@ milvus:
 
 #### SQLite 业务数据库
 
-聊天记录和工具调用审计使用本地 SQLite 文件，应用启动时自动创建目录、数据库和表结构。
+聊天记录和工具调用审计使用本地 SQLite 文件。应用启动时只创建数据库目录并打开连接，
+不会自动执行建表或升级脚本。
 
 ```yaml
 spring:
@@ -581,7 +582,9 @@ spring:
       connection-timeout: 10000
 ```
 
-SQLite 文件固定为 `./db/super-biz-agent.db`，不使用外部数据库或数据迁移流程。
+SQLite 文件固定为 `./db/super-biz-agent.db`，不使用外部数据库或自动迁移流程。
+初始化脚本为 `src/main/resources/db/V1_init.sql`，由发布人员手动执行；后续变更按
+`V2_xxx.sql`、`V3_xxx.sql` 顺序维护并手动执行。
 
 #### 统一 Responses API 配置
 

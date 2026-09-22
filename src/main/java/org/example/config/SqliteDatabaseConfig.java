@@ -1,8 +1,6 @@
 package org.example.config;
 
 import jakarta.annotation.PostConstruct;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
@@ -12,17 +10,15 @@ import java.sql.Connection;
 import java.sql.SQLException;
 
 /**
- * SQLite 数据库初始化配置。
+ * SQLite 数据库连接配置。
  *
  * <p>数据库文件路径由 application.yml 固定为 ./db/super-biz-agent.db。
- * 启动时创建目录、设置 SQLite 并发参数并幂等执行 schema。</p>
+ * 数据库初始化和升级脚本由人工执行，本类只负责创建目录和设置 SQLite 连接参数。</p>
  */
 @Component
 public class SqliteDatabaseConfig {
 
     private static final Path DATABASE_DIRECTORY = Path.of("./db");
-    private static final String SCHEMA_RESOURCE = "db/schema-sqlite.sql";
-
     private final DataSource dataSource;
 
     public SqliteDatabaseConfig(DataSource dataSource) {
@@ -34,7 +30,6 @@ public class SqliteDatabaseConfig {
         Files.createDirectories(DATABASE_DIRECTORY);
         try (Connection connection = dataSource.getConnection()) {
             configurePragmas(connection);
-            ScriptUtils.executeSqlScript(connection, new ClassPathResource(SCHEMA_RESOURCE));
         }
     }
 
