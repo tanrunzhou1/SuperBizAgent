@@ -55,7 +55,17 @@ public class CloudOpsBenchCaseRepository {
             Map<String, String> toolCache = new LinkedHashMap<>();
             rawCache.forEach((key, value) -> toolCache.put(key, value == null || value.isNull()
                     ? "" : value.isTextual() ? value.textValue() : value.toString()));
-            return new CloudOpsBenchCase(caseId, caseDirectory, metadata, toolCache);
+            Map<String, JsonNode> rawLogs = new LinkedHashMap<>();
+            Path logsPath = caseDirectory.resolve("raw_data/logs.json");
+            if (Files.isRegularFile(logsPath)) {
+                Map<String, JsonNode> parsedLogs = objectMapper.readValue(Files.readString(logsPath),
+                        new TypeReference<Map<String, JsonNode>>() {
+                        });
+                if (parsedLogs != null) {
+                    rawLogs.putAll(parsedLogs);
+                }
+            }
+            return new CloudOpsBenchCase(caseId, caseDirectory, metadata, toolCache, rawLogs);
         } catch (IOException exception) {
             throw new IllegalStateException("读取 Cloud-OpsBench 案例失败: " + caseId, exception);
         }

@@ -24,21 +24,25 @@ import java.util.TreeSet;
 @Component
 public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
     private static final List<ToolSpec> TOOL_SPECS = List.of(
-            new ToolSpec("GetAlerts", "获取案例中的告警和异常指标摘要", objectSchema(Map.of(
+            // Qwen3.7-flash 对完全空参数 schema 偶尔会生成空字符串 arguments，
+            // DashScope 服务端随后无法按 mapping 解析历史 tool_call。保留可选字段
+            // 让模型稳定生成 JSON object；回放时仍固定命中官方 GetAlerts:{} 缓存键。
+            new ToolSpec("GetAlerts", "获取案例中的告警和异常指标摘要（可选 namespace/service_name）", objectSchema(Map.of(
                     "namespace", stringSchema(), "service_name", stringSchema()))),
             new ToolSpec("GetRecentLogs", "获取案例中的近期原始日志", objectSchema(Map.of(
-                    "namespace", stringSchema(), "service_name", stringSchema()))),
+                    "namespace", stringSchema(), "service_name", stringSchema(), "lines", numberSchema()))),
             new ToolSpec("GetErrorLogs", "获取案例中的错误日志摘要", objectSchema(Map.of(
                     "namespace", stringSchema(), "service_name", stringSchema()))),
             new ToolSpec("GetResources", "查询案例中的 Kubernetes 资源状态", objectSchema(Map.of(
-                    "namespace", stringSchema(), "resource_type", anySchema(), "name", stringSchema(),
-                    "output_wide", booleanSchema(), "show_labels", booleanSchema()))),
+                    "namespace", stringSchema(), "resource_type", stringSchema(), "name", stringSchema(),
+                    "output_wide", booleanSchema(), "show_labels", booleanSchema(),
+                    "label_selector", stringSchema()))),
             new ToolSpec("DescribeResource", "查看案例中的 Kubernetes 资源详情", objectSchema(Map.of(
-                    "namespace", stringSchema(), "resource_type", anySchema(), "name", stringSchema()))),
+                    "namespace", stringSchema(), "resource_type", stringSchema(), "name", stringSchema()))),
             new ToolSpec("GetAppYAML", "获取案例中的应用配置 YAML", objectSchema(Map.of(
                     "app_name", stringSchema()))),
             new ToolSpec("GetServiceDependencies", "获取案例中的服务依赖关系", objectSchema(Map.of(
-                    "namespace", stringSchema(), "service_name", stringSchema()))),
+                    "service_name", stringSchema()))),
             new ToolSpec("CheckServiceConnectivity", "检查案例中的服务连通性", objectSchema(Map.of(
                     "namespace", stringSchema(), "service_name", stringSchema(), "port", numberSchema())))
     );
@@ -57,6 +61,16 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
             throw new IllegalArgumentException("ReplayAiOpsToolProvider 只能用于 REPLAY 模式");
         }
         CloudOpsBenchCase benchmarkCase = caseRepository.load(context.getCaseId());
+        JsonNode metadata = benchmarkCase.getMetadata();
+        String namespace = text(metadata, "namespace");
+        String query = text(metadata, "query");
+        if (!namespace.isBlank()) {
+            context.setNamespace(namespace);
+        }
+        if (!query.isBlank()) {
+            // 测评输入以案例 metadata 为准，避免请求体中的简写/改写导致不可复现。
+            context.setIncidentPrompt(query);
+        }
         return TOOL_SPECS.stream().map(spec -> callback(spec, benchmarkCase)).toArray(ToolCallback[]::new);
     }
 
@@ -86,14 +100,124 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
             if (input == null || !input.isObject()) {
                 return error("工具参数必须是 JSON 对象");
             }
+            String validationError = validateRequiredParameters(toolName, input);
+            if (validationError != null) {
+                return error(validationError);
+            }
+            if ("GetRecentLogs".equals(toolName)) {
+                return recentLogs(input, benchmarkCase);
+            }
+            // 官方 Cloud-OpsBench 工具的 GetAlerts 签名是无参，缓存键固定为 {}。
+            if ("GetAlerts".equals(toolName)) {
+                input = objectMapper.createObjectNode();
+            }
+            input = normalizeRequest(toolName, input);
             CacheMatch match = findBestMatch(toolName, input, benchmarkCase.getToolCache());
             if (match == null) {
                 return error("回放数据中没有匹配的工具调用: " + toolName + " " + input);
+            }
+            if ("GetAlerts".equals(toolName) && (match.value() == null || match.value().isBlank())) {
+                return "No active metric anomalies detected at this time.";
             }
             return match.value();
         } catch (Exception exception) {
             return error("回放工具执行失败: " + exception.getMessage());
         }
+    }
+
+    private String validateRequiredParameters(String toolName, JsonNode input) {
+        return switch (toolName) {
+            case "GetErrorLogs" -> requireFields(input, "namespace", "service_name");
+            case "GetResources" -> requireFields(input, "resource_type");
+            case "DescribeResource" -> requireFields(input, "resource_type", "name");
+            case "GetAppYAML" -> requireFields(input, "app_name");
+            case "GetServiceDependencies" -> requireFields(input, "service_name");
+            case "CheckServiceConnectivity" -> requireFields(input, "namespace", "service_name", "port");
+            default -> null;
+        };
+    }
+
+    private String requireFields(JsonNode input, String... fields) {
+        for (String field : fields) {
+            JsonNode value = input.get(field);
+            if (value == null || value.isNull() || value.isTextual() && value.asText().isBlank()) {
+                return "工具参数缺少必填字段: " + field;
+            }
+        }
+        return null;
+    }
+
+    private JsonNode normalizeRequest(String toolName, JsonNode input) {
+        ObjectNode normalized = input.deepCopy();
+        if ("GetServiceDependencies".equals(toolName)) {
+            // 官方签名只有 service_name；兼容模型偶尔带上的 namespace，但不让它影响缓存键匹配。
+            normalized.remove("namespace");
+        }
+        List<String> emptyFields = new ArrayList<>();
+        normalized.fields().forEachRemaining(field -> {
+            JsonNode value = field.getValue();
+            if (value == null || value.isNull() || value.isTextual() && value.asText().isBlank()
+                    || value.isBoolean() && !value.asBoolean()
+                    || value.isArray() && value.isEmpty()) {
+                emptyFields.add(field.getKey());
+            }
+        });
+        normalized.remove(emptyFields);
+        return normalized;
+    }
+
+    private String recentLogs(JsonNode input, CloudOpsBenchCase benchmarkCase) {
+        String namespace = text(input, "namespace");
+        String serviceName = text(input, "service_name");
+        int lines = input.has("lines") && input.get("lines").canConvertToInt()
+                ? Math.max(1, input.get("lines").asInt()) : 50;
+        String expectedNamespace = text(benchmarkCase.getMetadata(), "namespace");
+        if (namespace.isBlank() || serviceName.isBlank()) {
+            return error("GetRecentLogs requires namespace and service_name");
+        }
+        if (!expectedNamespace.isBlank() && !expectedNamespace.equals(namespace)) {
+            return error("GetRecentLogs expected namespace '" + expectedNamespace + "', got '" + namespace + "'");
+        }
+
+        List<String> collected = new ArrayList<>();
+        appendLogSection(collected, benchmarkCase.getRawLogs().get(serviceName), "From " + serviceName + " logs:", lines);
+        appendLogSection(collected, benchmarkCase.getRawLogs().get(serviceName + ".previous"),
+                "From previous container logs:", lines);
+        appendLogSection(collected, benchmarkCase.getRawLogs().get(serviceName + ".istio-proxy"),
+                "From istio-proxy logs:", lines);
+        if (collected.isEmpty()) {
+            return "No recent logs found for " + serviceName + " in " + namespace + " namespace.";
+        }
+        return String.join("\n", collected);
+    }
+
+    private void appendLogSection(List<String> collected, JsonNode rawValue, String header, int lines) {
+        if (rawValue == null || rawValue.isNull()) {
+            return;
+        }
+        List<String> entries = new ArrayList<>();
+        if (rawValue.isArray()) {
+            rawValue.forEach(item -> {
+                if (!item.asText().isBlank()) {
+                    entries.add(item.asText());
+                }
+            });
+        } else {
+            String text = rawValue.asText();
+            for (String line : text.split("\\R")) {
+                if (!line.isBlank()) {
+                    entries.add(line);
+                }
+            }
+        }
+        if (entries.isEmpty()) {
+            return;
+        }
+        if (!collected.isEmpty()) {
+            collected.add("");
+        }
+        collected.add(header);
+        collected.addAll(entries.subList(Math.max(0, entries.size() - lines), entries.size()));
     }
 
     private CacheMatch findBestMatch(String toolName, JsonNode input, Map<String, String> cache) throws Exception {
@@ -171,9 +295,27 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
         if (node.isArray()) {
             node.forEach(item -> values.add(item.asText().trim().toLowerCase()));
         } else {
-            values.add(node.asText().trim().toLowerCase());
+            String text = node.asText().trim();
+            // Qwen 等模型有时会把官方的 string[] 参数编码成 JSON 字符串。
+            if (text.startsWith("[") && text.endsWith("]")) {
+                try {
+                    JsonNode parsed = objectMapper.readTree(text);
+                    if (parsed.isArray()) {
+                        parsed.forEach(item -> values.add(item.asText().trim().toLowerCase()));
+                        return values;
+                    }
+                } catch (Exception ignored) {
+                    // 保持为普通字符串，由上层返回未命中，避免猜测参数含义。
+                }
+            }
+            values.add(text.toLowerCase());
         }
         return values;
+    }
+
+    private String text(JsonNode node, String field) {
+        JsonNode value = node == null ? null : node.get(field);
+        return value == null || value.isNull() ? "" : value.asText("").trim();
     }
 
     private String error(String message) {
@@ -206,10 +348,6 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
 
     private static String numberSchema() {
         return "{\"type\":\"integer\"}";
-    }
-
-    private static String anySchema() {
-        return "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{\"type\":\"string\"}}]}";
     }
 
     private record ToolSpec(String name, String description, String inputSchema) {

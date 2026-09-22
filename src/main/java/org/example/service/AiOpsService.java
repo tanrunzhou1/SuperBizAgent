@@ -1,6 +1,6 @@
 package org.example.service;
 
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
+import com.alibaba.cloud.ai.graph.CompileConfig;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.flow.agent.SupervisorAgent;
@@ -13,11 +13,15 @@ import org.example.common.aiops.AiOpsRunContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Optional;
 
 /**
@@ -49,7 +53,7 @@ public class AiOpsService {
      * @return 分析结果状态
      * @throws GraphRunnerException 如果 Agent 执行失败
      */
-    public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks) throws GraphRunnerException {
+    public Optional<OverAllState> executeAiOpsAnalysis(ChatModel chatModel, ToolCallback[] toolCallbacks) throws GraphRunnerException {
         return executeAiOpsAnalysis(chatModel, toolCallbacks,
                 AiOpsRunContext.live("请读取当前活跃告警并执行故障分析。"));
     }
@@ -57,7 +61,7 @@ public class AiOpsService {
     /**
      * 使用统一运行上下文执行 AI Ops 分析。旧方法保留用于兼容已有调用方。
      */
-    public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel,
+    public Optional<OverAllState> executeAiOpsAnalysis(ChatModel chatModel,
             ToolCallback[] toolCallbacks, AiOpsRunContext runContext) throws GraphRunnerException {
         logger.info("开始执行 AI Ops 多 Agent 协作流程");
 
@@ -72,6 +76,7 @@ public class AiOpsService {
                 .model(chatModel)
                 .systemPrompt(buildSupervisorSystemPrompt())
                 .subAgents(List.of(plannerAgent, executorAgent))
+                .compileConfig(compileConfig(runContext))
                 .build();
 
         String taskPrompt = runContext == null
@@ -91,25 +96,50 @@ public class AiOpsService {
     public Optional<String> extractFinalReport(OverAllState state) {
         logger.info("开始提取最终报告...");
 
-        // 提取 Planner 最终输出（包含完整的告警分析报告）
-        Optional<AssistantMessage> plannerFinalOutput = state.value("planner_plan")
-                .filter(AssistantMessage.class::isInstance)
-                .map(AssistantMessage.class::cast);
+        List<String> candidates = new ArrayList<>();
+        collectReportCandidate(state.data().get("planner_plan"), candidates);
+        collectReportCandidate(state.data().get("messages"), candidates);
+        collectReportCandidate(state.data().get("executor_feedback"), candidates);
 
-        if (plannerFinalOutput.isPresent()) {
-            String reportText = plannerFinalOutput.get().getText();
-            logger.info("成功提取到 Planner 最终报告，长度: {}", reportText.length());
-            return Optional.of(reportText);
-        } else {
-            logger.warn("未能提取到 Planner 最终报告");
-            return Optional.empty();
+        // 优先选择真正包含结构化诊断字段的输出，避免把中间工具调用文本当成最终报告。
+        for (String candidate : candidates) {
+            if (candidate.contains("faultObject") && candidate.contains("rootCause")) {
+                logger.info("成功提取到结构化 Planner 最终报告，长度: {}", candidate.length());
+                return Optional.of(candidate);
+            }
+        }
+        if (!candidates.isEmpty()) {
+            String fallback = candidates.get(0);
+            logger.warn("未找到结构化最终报告，返回最后一个 Agent 文本，长度: {}", fallback.length());
+            return Optional.of(fallback);
+        }
+        logger.warn("未能提取到 Planner 最终报告");
+        return Optional.empty();
+    }
+
+    private void collectReportCandidate(Object value, List<String> candidates) {
+        if (value instanceof AssistantMessage assistantMessage) {
+            if (assistantMessage.getText() != null && !assistantMessage.getText().isBlank()) {
+                candidates.add(assistantMessage.getText());
+            }
+        }
+        else if (value instanceof Message message && message.getText() != null && !message.getText().isBlank()) {
+            candidates.add(message.getText());
+        }
+        else if (value instanceof Collection<?> collection) {
+            for (Object item : collection) {
+                collectReportCandidate(item, candidates);
+            }
+        }
+        else if (value instanceof String text && !text.isBlank()) {
+            candidates.add(text);
         }
     }
 
     /**
      * 构建 Planner Agent
      */
-    private ReactAgent buildPlannerAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks,
+    private ReactAgent buildPlannerAgent(ChatModel chatModel, ToolCallback[] toolCallbacks,
             AiOpsRunContext runContext) {
         return ReactAgent.builder()
                 .name("planner_agent")
@@ -118,6 +148,7 @@ public class AiOpsService {
                 .systemPrompt(buildPlannerPrompt())
                 .methodTools(buildMethodToolsArray(runContext))
                 .tools(toolCallbacks)
+                .compileConfig(compileConfig(runContext))
                 .outputKey("planner_plan")
                 .build();
     }
@@ -125,7 +156,7 @@ public class AiOpsService {
     /**
      * 构建 Executor Agent
      */
-    private ReactAgent buildExecutorAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks,
+    private ReactAgent buildExecutorAgent(ChatModel chatModel, ToolCallback[] toolCallbacks,
             AiOpsRunContext runContext) {
         return ReactAgent.builder()
                 .name("executor_agent")
@@ -134,8 +165,18 @@ public class AiOpsService {
                 .systemPrompt(buildExecutorPrompt())
                 .methodTools(buildMethodToolsArray(runContext))
                 .tools(toolCallbacks)
+                .compileConfig(compileConfig(runContext))
                 .outputKey("executor_feedback")
                 .build();
+    }
+
+    /**
+     * 图递归次数包含 Supervisor/Planner/Executor 的路由节点，不能直接等同于工具步数。
+     * 工具步数由 AiOpsRunService 的共享预算严格限制；这里给图本身留出足够的路由空间。
+     */
+    private CompileConfig compileConfig(AiOpsRunContext runContext) {
+        int maxSteps = runContext == null ? 20 : Math.max(1, runContext.getMaxSteps());
+        return CompileConfig.builder().recursionLimit(Math.max(20, maxSteps * 10)).build();
     }
 
     /**
@@ -167,7 +208,8 @@ public class AiOpsService {
                 2. 分析 Prometheus 告警、日志、内部文档等信息，制定可执行的下一步步骤。
                 3. 在执行阶段，输出 JSON，包含 decision (PLAN|EXECUTE|FINISH)、step 描述、预期要调用的工具、以及必要的上下文。
                 4. 调用任何腾讯云日志/主题相关工具时，region 参数必须使用连字符格式（如 ap-guangzhou），若不确定请省略以使用默认值。
-                5. 严格禁止编造数据，只能引用工具返回的真实内容。工具返回 success=false 时，表示代码已完成该工具的系统级重试；不得以相同参数重复调用，应切换排查方向或在最终报告说明"无法完成"的原因。
+                5. 严格禁止编造数据，只能引用工具返回的真实内容。工具返回 success=false 时，表示代码已完成该工具的系统级重试；不得以相同参数重复调用，应切换排查方向或在最终报告说明"无法完成"的原因。success=false 的返回绝不是证据，不得写入 keyEvidence。
+                6. 当工具返回 code=MAX_STEPS_EXCEEDED 时，立即停止工具调用并输出最终 JSON；不得再次调用任何工具。
                 
                 ## 最终报告输出要求（CRITICAL）
                 
@@ -272,8 +314,9 @@ public class AiOpsService {
                 你是 Executor Agent，负责读取 Planner 最新输出 {planner_plan}，只执行其中的第一步。
                 - 确认步骤所需的工具与参数，尤其是 region 参数要使用连字符格式（ap-guangzhou）；若 Planner 未给出则使用默认区域。
                 - 调用相应的工具并收集结果。如工具返回 success=false，需要记录失败原因、请求参数、attempts 和 traceId；该调用已完成代码级重试，不得以相同参数再次调用，应返回 FAILED 并建议 Planner 切换排查方向。空数据不是失败，应如实记录。
+                - 如果工具返回 code=MAX_STEPS_EXCEEDED，立即返回当前已有证据，不再请求工具。
                 - 将日志、指标、文档等证据整理成结构化摘要，标注对应的告警名称或资源，方便 Planner 填充"告警根因分析 / 处理方案执行"章节。
-                - 以 JSON 形式返回执行状态、证据以及给 Planner 的建议，写入 executor_feedback，严禁编造未实际查询到的内容。
+                - 以 JSON 形式返回执行状态、证据以及给 Planner 的建议，写入 executor_feedback，严禁编造未实际查询到的内容。只有成功工具调用的返回内容才可作为证据。
 
 
                 输出示例：
@@ -295,6 +338,8 @@ public class AiOpsService {
                 1. 当需要拆解任务或重新制定策略时，调用 planner_agent。
                 2. 当 planner_agent 输出 decision=EXECUTE 时，调用 executor_agent 执行第一步。
                 3. 根据 executor_agent 的反馈，评估是否需要再次调用 planner_agent，直到 decision=FINISH。
+                3.1 路由状态机：首次调用 planner_agent；Planner 给出 EXECUTE 后调用 executor_agent；Executor 返回后最多再调用一次 planner_agent。若 Planner 已输出结构化诊断、decision=FINISH、已有足够证据，必须直接 FINISH。
+                3.2 禁止连续两次在没有新增 Executor 证据时调用 planner_agent；没有新增证据时必须 FINISH，不能循环重规划。
                 4. FINISH 后，确保 Planner 输出包含 status、faultObject、rootCause、confidence、impact、keyEvidence、recommendedActions 的单个 JSON 对象；服务端负责生成《告警分析报告》。
                 5. 若步骤涉及腾讯云日志/主题工具，请确保使用连字符区域 ID（ap-guangzhou 等），或省略 region 以采用默认值。
                 6. 如果 Executor 返回工具 success=false，必须停止该工具的同参数重复调用，改用其他证据源；若关键证据均不可用，直接输出"任务无法完成"的报告，明确列出 error code、attempts 和 traceId，严禁凭空编造结果。

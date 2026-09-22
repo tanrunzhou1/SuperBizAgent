@@ -16,12 +16,19 @@ public class CloudOpsBenchCase {
     private final Path directory;
     private final JsonNode metadata;
     private final Map<String, String> toolCache;
+    private final Map<String, JsonNode> rawLogs;
 
     public CloudOpsBenchCase(String caseId, Path directory, JsonNode metadata,
             Map<String, String> toolCache) {
+        this(caseId, directory, metadata, toolCache, Collections.emptyMap());
+    }
+
+    public CloudOpsBenchCase(String caseId, Path directory, JsonNode metadata,
+            Map<String, String> toolCache, Map<String, JsonNode> rawLogs) {
         this.caseId = caseId;
         this.directory = directory;
         this.metadata = metadata;
         this.toolCache = Collections.unmodifiableMap(toolCache);
+        this.rawLogs = Collections.unmodifiableMap(rawLogs);
     }
 }
