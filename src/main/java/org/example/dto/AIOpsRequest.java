@@ -30,9 +30,16 @@ public class AIOpsRequest {
     /** 单次运行最大 Agent 步数。 */
     private Integer maxSteps = 20;
 
+    /** 是否使用 SSE 流式响应；默认 true，保持现有接口行为兼容。 */
+    private Boolean stream = true;
+
     private List<String> serviceScope = new ArrayList<>();
     private String startTime;
     private String endTime;
+
+    public boolean shouldStream() {
+        return stream == null || stream;
+    }
 
     public AiOpsRunContext toRunContext() {
         AiOpsRunContext context = new AiOpsRunContext();

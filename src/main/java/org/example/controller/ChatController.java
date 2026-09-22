@@ -8,6 +8,7 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
+import org.example.common.aiops.AiOpsRunMode;
 import org.example.common.api.ApiError;
 import org.example.common.api.ApiResponse;
 import org.example.common.api.ChatSessionContext;
@@ -22,6 +23,7 @@ import org.example.service.ChatService;
 import org.example.service.ChatSessionService;
 import org.example.service.AiOpsRunService;
 import org.example.dto.AIOpsRequest;
+import org.example.dto.AIOpsResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -255,26 +257,41 @@ public class ChatController {
     /**
      * AI 智能运维接口（SSE 流式模式）。请求体可选，未提供时读取当前活跃告警。
      */
-    @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
-    public SseEmitter aiOps(@RequestBody(required = false) AIOpsRequest request) {
+    @PostMapping("/ai_ops")
+    public Object aiOps(@RequestBody(required = false) AIOpsRequest request) {
         AIOpsRequest safeRequest = request == null ? new AIOpsRequest() : request;
         AiOpsRunContext context = safeRequest.toRunContext();
-        if (context.getMode() != org.example.common.aiops.AiOpsRunMode.LIVE) {
+        if (context.getMode() != AiOpsRunMode.LIVE) {
             throw new BusinessException(ErrorCode.INVALID_REQUEST, "生产接口只允许 LIVE 运行模式");
         }
-        return startAiOpsStream(context);
+        return safeRequest.shouldStream() ? startAiOpsStream(context) : runAiOpsSync(context);
     }
 
     /**
      * 单案例测评接口。当前从 Cloud-OpsBench 冻结快照执行一个 caseId。
      */
-    @PostMapping(value = "/ai-ops/evaluations", produces = "text/event-stream;charset=UTF-8")
-    public SseEmitter evaluateAiOps(@RequestBody AIOpsRequest request) {
+    @PostMapping("/ai-ops/evaluations")
+    public Object evaluateAiOps(@RequestBody AIOpsRequest request) {
         if (request == null || request.getCaseId() == null || request.getCaseId().isBlank()) {
             throw new BusinessException(ErrorCode.INVALID_REQUEST, "测评接口必须提供 caseId");
         }
-        request.setMode(org.example.common.aiops.AiOpsRunMode.REPLAY);
-        return startAiOpsStream(request.toRunContext());
+        request.setMode(AiOpsRunMode.REPLAY);
+        AiOpsRunContext context = request.toRunContext();
+        return request.shouldStream() ? startAiOpsStream(context) : runAiOpsSync(context);
+    }
+
+    private ResponseEntity<ApiResponse<AIOpsResponse>> runAiOpsSync(AiOpsRunContext context) {
+        try {
+            AiOpsRunResult runResult = runAiOps(context);
+            return ResponseEntity.ok(ApiResponse.success(AIOpsResponse.from(runResult)));
+        } catch (Exception exception) {
+            logger.error("AI Ops 非流式执行失败, mode={}, caseId={}", context.getMode(), context.getCaseId(), exception);
+            ErrorCode errorCode = exception instanceof IllegalArgumentException
+                    || exception instanceof UnsupportedOperationException
+                    ? ErrorCode.BUSINESS_ERROR : ErrorCode.MODEL_UNAVAILABLE;
+            throw new BusinessException(errorCode,
+                    "AI Ops 执行失败: " + safeMessage(exception));
+        }
     }
 
     private SseEmitter startAiOpsStream(AiOpsRunContext context) {
@@ -283,12 +300,10 @@ public class ChatController {
             try {
                 logger.info("收到 AI Ops 请求 - mode={}, caseId={}, runId={}",
                         context.getMode(), context.getCaseId(), context.getRunId());
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createChatModel(dashScopeApi, 0.3, 8000, 0.9);
                 emitter.send(SseEmitter.event().name("message")
                         .data(SseMessage.content("正在读取告警并拆解任务...\n"), MediaType.APPLICATION_JSON));
 
-                AiOpsRunResult runResult = aiOpsRunService.run(chatModel, context);
+                AiOpsRunResult runResult = runAiOps(context);
                 String report = runResult.getMarkdownReport();
                 for (int i = 0; i < report.length(); i += 50) {
                     emitter.send(SseEmitter.event().name("message")
@@ -310,6 +325,17 @@ public class ChatController {
             }
         });
         return emitter;
+    }
+
+    private AiOpsRunResult runAiOps(AiOpsRunContext context) throws Exception {
+        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
+        DashScopeChatModel chatModel = chatService.createChatModel(dashScopeApi, 0.3, 8000, 0.9);
+        return aiOpsRunService.run(chatModel, context);
+    }
+
+    private String safeMessage(Exception exception) {
+        String message = exception.getMessage();
+        return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
     }
 
 
