@@ -1,7 +1,5 @@
 package org.example.controller;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
@@ -27,6 +25,7 @@ import org.example.dto.AIOpsResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -78,8 +77,7 @@ public class ChatController {
         ChatSessionContext.set(sessionId);
         try {
 
-        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-        DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+        ChatModel chatModel = chatService.createStandardChatModel();
 
         chatService.logAvailableTools();
 
@@ -143,9 +141,8 @@ public class ChatController {
                 ChatSessionContext.set(sessionId);
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                // 创建 DashScope API 和 ChatModel
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+                // 根据 ai.model.provider 创建 ChatModel
+                ChatModel chatModel = chatService.createStandardChatModel();
 
                 // 记录可用工具
                 chatService.logAvailableTools();
@@ -328,8 +325,7 @@ public class ChatController {
     }
 
     private AiOpsRunResult runAiOps(AiOpsRunContext context) throws Exception {
-        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-        DashScopeChatModel chatModel = chatService.createChatModel(dashScopeApi, 0.3, 8000, 0.9);
+        ChatModel chatModel = chatService.createAiOpsChatModel();
         return aiOpsRunService.run(chatModel, context);
     }
 

@@ -41,6 +41,16 @@ spring:
           multiplier: 2  # 重试间隔倍数
           max-interval: 10000  # 最大重试间隔10秒
 
+# 统一聊天模型配置。支持 dashscope、deepseek、openai-compatible。
+# DeepSeek 示例：AI_MODEL_PROVIDER=deepseek，AI_MODEL_API_KEY=sk-xxx，AI_MODEL_NAME=deepseek-chat
+# 其他 OpenAI-compatible 厂商还需要设置 AI_MODEL_BASE_URL。
+ai:
+  model:
+    provider: ${AI_MODEL_PROVIDER:dashscope}
+    api-key: ${AI_MODEL_API_KEY:}
+    base-url: ${AI_MODEL_BASE_URL:}
+    model: ${AI_MODEL_NAME:}
+
     # Spring AI MCP 客户端配置
     # 如果使用mock数据，请注释这部分内容
 #    mcp:

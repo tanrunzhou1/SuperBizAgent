@@ -1,6 +1,7 @@
 package org.example.service;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
+import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -57,7 +58,11 @@ public class AiOpsRunService {
         AiOpsRunTrace trace = new AiOpsRunTrace(context.getRunId());
         AiOpsStepBudget stepBudget = new AiOpsStepBudget(context == null ? 20 : context.getMaxSteps());
         ToolCallback[] tracedCallbacks = wrapToolCallbacks(toolCallbacks, trace, stepBudget);
-        ChatModel compatibleChatModel = new QwenToolCallSanitizingChatModel(chatModel, objectMapper);
+        // 该兼容层是为 DashScope/Qwen 的 tool-call 历史格式准备的。
+        // DeepSeek 等原生 ChatModel 保留官方工具消息结构，不能强行文本化。
+        ChatModel compatibleChatModel = chatModel instanceof DashScopeChatModel
+                ? new QwenToolCallSanitizingChatModel(chatModel, objectMapper)
+                : chatModel;
         Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(compatibleChatModel, tracedCallbacks, context);
         if (state.isEmpty()) {
             throw new IllegalStateException("多 Agent 编排未获取到有效结果");
