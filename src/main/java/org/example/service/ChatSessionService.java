@@ -15,12 +15,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 聊天会话持久化服务。
  */
 @Service
 public class ChatSessionService {
+    private static final int SESSION_LOCK_COUNT = 64;
     private static final int TITLE_MAX_LENGTH = 255;
     private static final String USER_ROLE = "USER";
     private static final String ASSISTANT_ROLE = "ASSISTANT";
@@ -28,6 +30,7 @@ public class ChatSessionService {
     private final ChatSessionMapper chatSessionMapper;
     private final ChatMessageMapper chatMessageMapper;
     private final TransactionTemplate transactionTemplate;
+    private final ReentrantLock[] sessionLocks = createSessionLocks();
 
     public ChatSessionService(ChatSessionMapper chatSessionMapper, ChatMessageMapper chatMessageMapper,
             TransactionTemplate transactionTemplate) {
@@ -45,7 +48,14 @@ public class ChatSessionService {
     public String getOrCreateSession(String requestedSessionId) {
         String sessionId = requestedSessionId == null || requestedSessionId.isBlank()
                 ? UUID.randomUUID().toString() : requestedSessionId;
-        chatSessionMapper.insertIgnore(sessionId);
+        ReentrantLock lock = lockFor(sessionId);
+        lock.lock();
+        try {
+            chatSessionMapper.insertIgnore(sessionId);
+        }
+        finally {
+            lock.unlock();
+        }
         return sessionId;
     }
 
@@ -75,25 +85,24 @@ public class ChatSessionService {
      * @param traceId 请求链路标识
      */
     public void saveTurn(String sessionId, String question, String answer, String traceId) {
-        transactionTemplate.executeWithoutResult(status -> {
-            // 锁定会话行，保证同一会话生成的消息序号不会重复。
-            ChatSessionEntity session = chatSessionMapper.selectBySessionIdForUpdate(sessionId);
-            if (session == null) {
-                throw new IllegalArgumentException("会话不存在");
-            }
+        withSessionLock(sessionId, () -> transactionTemplate.executeWithoutResult(status -> {
+                ChatSessionEntity session = chatSessionMapper.selectBySessionId(sessionId);
+                if (session == null) {
+                    throw new IllegalArgumentException("会话不存在");
+                }
 
-            Integer lastSequenceNo = chatMessageMapper.selectMaxSequenceNo(sessionId);
-            int userSequenceNo = lastSequenceNo == null ? 1 : lastSequenceNo + 1;
-            insertMessage(sessionId, userSequenceNo, USER_ROLE, question, traceId);
-            insertMessage(sessionId, userSequenceNo + 1, ASSISTANT_ROLE, answer, traceId);
+                Integer lastSequenceNo = chatMessageMapper.selectMaxSequenceNo(sessionId);
+                int userSequenceNo = lastSequenceNo == null ? 1 : lastSequenceNo + 1;
+                insertMessage(sessionId, userSequenceNo, USER_ROLE, question, traceId);
+                insertMessage(sessionId, userSequenceNo + 1, ASSISTANT_ROLE, answer, traceId);
 
-            // 首次消息作为标题，并更新会话最后活跃时间。
-            int affectedRows = chatSessionMapper.update(null, new LambdaUpdateWrapper<ChatSessionEntity>()
-                    .eq(ChatSessionEntity::getSessionId, sessionId)
-                    .setSql("title = COALESCE(title, {0})", truncate(question, TITLE_MAX_LENGTH))
-                    .set(ChatSessionEntity::getLastMessageAt, LocalDateTime.now()));
-            assertAffectedRows(affectedRows, "更新会话失败");
-        });
+                // 首次消息作为标题，并更新会话最后活跃时间。
+                int affectedRows = chatSessionMapper.update(null, new LambdaUpdateWrapper<ChatSessionEntity>()
+                        .eq(ChatSessionEntity::getSessionId, sessionId)
+                        .setSql("title = COALESCE(title, {0})", truncate(question, TITLE_MAX_LENGTH))
+                        .set(ChatSessionEntity::getLastMessageAt, LocalDateTime.now()));
+                assertAffectedRows(affectedRows, "更新会话失败");
+            }));
     }
 
     /**
@@ -102,21 +111,21 @@ public class ChatSessionService {
      * @param sessionId 会话标识
      */
     public void clear(String sessionId) {
-        transactionTemplate.executeWithoutResult(status -> {
-            ChatSessionEntity session = chatSessionMapper.selectBySessionIdForUpdate(sessionId);
-            if (session == null) {
-                throw new IllegalArgumentException("会话不存在");
-            }
+        withSessionLock(sessionId, () -> transactionTemplate.executeWithoutResult(status -> {
+                ChatSessionEntity session = chatSessionMapper.selectBySessionId(sessionId);
+                if (session == null) {
+                    throw new IllegalArgumentException("会话不存在");
+                }
 
-            chatMessageMapper.delete(new LambdaQueryWrapper<ChatMessageEntity>()
-                    .eq(ChatMessageEntity::getSessionId, sessionId));
-            int affectedRows = chatSessionMapper.update(null, new LambdaUpdateWrapper<ChatSessionEntity>()
-                    .eq(ChatSessionEntity::getSessionId, sessionId)
-                    .set(ChatSessionEntity::getSummary, null)
-                    .set(ChatSessionEntity::getSummaryCoveredSequenceNo, 0)
-                    .set(ChatSessionEntity::getLastMessageAt, null));
-            assertAffectedRows(affectedRows, "清空会话失败");
-        });
+                chatMessageMapper.delete(new LambdaQueryWrapper<ChatMessageEntity>()
+                        .eq(ChatMessageEntity::getSessionId, sessionId));
+                int affectedRows = chatSessionMapper.update(null, new LambdaUpdateWrapper<ChatSessionEntity>()
+                        .eq(ChatSessionEntity::getSessionId, sessionId)
+                        .set(ChatSessionEntity::getSummary, null)
+                        .set(ChatSessionEntity::getSummaryCoveredSequenceNo, 0)
+                        .set(ChatSessionEntity::getLastMessageAt, null));
+                assertAffectedRows(affectedRows, "清空会话失败");
+            }));
     }
 
     /**
@@ -158,6 +167,30 @@ public class ChatSessionService {
 
     private String truncate(String value, int maxLength) {
         return value.length() <= maxLength ? value : value.substring(0, maxLength);
+    }
+
+    private void withSessionLock(String sessionId, Runnable action) {
+        ReentrantLock lock = lockFor(sessionId);
+        lock.lock();
+        try {
+            action.run();
+        }
+        finally {
+            lock.unlock();
+        }
+    }
+
+    private ReentrantLock lockFor(String sessionId) {
+        int index = Math.floorMod(sessionId.hashCode(), sessionLocks.length);
+        return sessionLocks[index];
+    }
+
+    private static ReentrantLock[] createSessionLocks() {
+        ReentrantLock[] locks = new ReentrantLock[SESSION_LOCK_COUNT];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new ReentrantLock();
+        }
+        return locks;
     }
 
     /**

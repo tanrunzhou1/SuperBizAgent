@@ -567,6 +567,22 @@ milvus:
   timeout: 10000               # 超时时间（毫秒）
 ```
 
+#### SQLite 业务数据库
+
+聊天记录和工具调用审计使用本地 SQLite 文件，应用启动时自动创建目录、数据库和表结构。
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:sqlite:./db/super-biz-agent.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+      connection-timeout: 10000
+```
+
+SQLite 文件固定为 `./db/super-biz-agent.db`，不使用外部数据库或数据迁移流程。
+
 #### 统一 Responses API 配置
 
 ```yaml

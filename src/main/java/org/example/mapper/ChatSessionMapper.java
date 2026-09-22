@@ -17,7 +17,7 @@ public interface ChatSessionMapper extends BaseMapper<ChatSessionEntity> {
      * @param sessionId 会话标识
      * @return 受影响行数
      */
-    @Insert("INSERT IGNORE INTO chat_session (session_id) VALUES (#{sessionId})")
+    @Insert("INSERT OR IGNORE INTO chat_session (session_id) VALUES (#{sessionId})")
     int insertIgnore(String sessionId);
 
     /**
@@ -26,6 +26,6 @@ public interface ChatSessionMapper extends BaseMapper<ChatSessionEntity> {
      * @param sessionId 会话标识
      * @return 会话记录；不存在时为 null
      */
-    @Select("SELECT * FROM chat_session WHERE session_id = #{sessionId} FOR UPDATE")
-    ChatSessionEntity selectBySessionIdForUpdate(String sessionId);
+    @Select("SELECT * FROM chat_session WHERE session_id = #{sessionId}")
+    ChatSessionEntity selectBySessionId(String sessionId);
 }

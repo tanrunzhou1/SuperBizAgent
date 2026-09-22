@@ -115,6 +115,15 @@ milvus:
   host: localhost
   port: 19530
 
+# SQLite 业务数据库（聊天记录与工具调用审计）
+spring:
+  datasource:
+    url: jdbc:sqlite:./db/super-biz-agent.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+      connection-timeout: 10000
+
 # 对话和 AI Ops 统一使用 Responses API
 ai:
   model:

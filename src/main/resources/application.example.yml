@@ -21,10 +21,12 @@ milvus:
 
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/super_biz_agent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
-    username: root
-    password: xxx
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:sqlite:./db/super-biz-agent.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+      minimum-idle: 1
+      connection-timeout: 10000
 # 统一聊天模型配置。支持 dashscope、deepseek、openai-compatible。
 # DeepSeek 示例：AI_MODEL_PROVIDER=deepseek，AI_MODEL_API_KEY=sk-xxx，AI_MODEL_NAME=deepseek-flash
 # 其他 OpenAI-compatible 厂商还需要设置 AI_MODEL_BASE_URL。

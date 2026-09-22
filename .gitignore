@@ -56,3 +56,4 @@ uploads/
 /server.pid
 
 src/main/resources/application.yml
+/db/
