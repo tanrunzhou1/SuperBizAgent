@@ -1,10 +1,8 @@
 package org.example.service;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.AiModelProperties;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
@@ -17,19 +15,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.deepseek.DeepSeekChatModel;
-import org.springframework.ai.deepseek.DeepSeekChatOptions;
-import org.springframework.ai.deepseek.api.DeepSeekApi;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.ai.openai.OpenAiChatOptions;
-import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
-import static com.alibaba.cloud.ai.dashscope.common.DashScopeApiConstants.MULTIMODAL_GENERATION_RESTFUL_URL;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -60,14 +51,8 @@ public class ChatService {
     @Autowired
     private AiModelProperties aiModelProperties;
 
-    @Value("${spring.ai.dashscope.api-key:}")
-    private String dashScopeApiKey;
-
-    @Value("${spring.ai.dashscope.chat.options.model:qwen-plus}")
-    private String chatModelName;
-
-    @Value("${spring.ai.dashscope.chat.options.multi-model:false}")
-    private boolean multiModel;
+    @Autowired
+    private ObjectMapper objectMapper;
 
     /**
      * 应用启动时输出最终生效的模型配置，便于确认当前 Agent 使用的模型。
@@ -78,70 +63,29 @@ public class ChatService {
         String provider = normalized(aiModelProperties.getProvider(), "dashscope");
         String model = resolvedModelName(provider);
         String baseUrl = resolvedBaseUrl(provider);
-        logger.info("AI 模型初始化完成: provider={}, model={}, baseUrl={}", provider, model, baseUrl);
-    }
-
-    /**
-     * 创建 DashScope API 实例
-     */
-    public DashScopeApi createDashScopeApi() {
-        DashScopeApi.Builder builder = DashScopeApi.builder()
-                .apiKey(dashScopeApiKey);
-
-        // ReactAgent 注册工具后，当前 Spring AI Alibaba 版本可能在选项合并时
-        // 将 multiModel=true 覆盖为 false。显式设置端点以保证多模态模型走正确路径。
-        if (multiModel) {
-            builder.completionsPath(MULTIMODAL_GENERATION_RESTFUL_URL);
+        Duration timeout = resolvedTimeout();
+        if (timeout.compareTo(Duration.ofSeconds(1)) < 0) {
+            throw new IllegalStateException("ai.model.timeout 过小: " + timeout
+                    + "。请使用 180s、3m，或将 AI_MODEL_TIMEOUT 设置为 180s；裸数字按秒解释。");
         }
-
-        return builder.build();
+        logger.info("Responses 模型初始化完成: provider={}, model={}, baseUrl={}, timeout={}",
+                provider, model, baseUrl, timeout);
     }
 
-    /**
-     * 创建 ChatModel
-     * @param temperature 控制随机性 (0.0-1.0)
-     * @param maxToken 最大输出长度
-     * @param topP 核采样参数
-     */
-    public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi, double temperature, int maxToken, double topP) {
-        logger.info("创建 DashScope ChatModel: model={}, multiModel={}", chatModelName, multiModel);
-        return DashScopeChatModel.builder()
-                .dashScopeApi(dashScopeApi)
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(chatModelName)
-                        .multiModel(multiModel)
-                        .withTemperature(temperature)
-                        .withMaxToken(maxToken)
-                        .withTopP(topP)
-                        .build())
-                .build();
-    }
-
-    /**
-     * 创建标准对话 ChatModel（默认参数）
-     */
-    public DashScopeChatModel createStandardChatModel(DashScopeApi dashScopeApi) {
-        return createChatModel(dashScopeApi, 0.7, 2000, 0.9);
-    }
-
-    /**
-     * 根据 ai.model.provider 创建统一 ChatModel。
-     * AIOps、Replay 和普通聊天都通过该入口获取模型，避免在 Controller 中绑定具体厂商类型。
-     */
+    /** 根据统一配置创建 Responses API ChatModel。 */
     public ChatModel createChatModel(double temperature, int maxToken, double topP) {
         String provider = normalized(aiModelProperties.getProvider(), "dashscope");
-        if ("dashscope".equals(provider)) {
-            DashScopeApi dashScopeApi = createDashScopeApi();
-            return createChatModel(dashScopeApi, temperature, maxToken, topP);
+        if (!List.of("dashscope", "deepseek", "openai", "openai-compatible").contains(provider)) {
+            throw new IllegalArgumentException("不支持的大模型 provider: " + provider
+                    + "，当前支持 dashscope、deepseek、openai-compatible");
         }
-        if ("deepseek".equals(provider)) {
-            return createDeepSeekChatModel(temperature, maxToken, topP);
-        }
-        if ("openai".equals(provider) || "openai-compatible".equals(provider)) {
-            return createOpenAiCompatibleChatModel(temperature, maxToken, topP);
-        }
-        throw new IllegalArgumentException("不支持的大模型 provider: " + provider
-                + "，当前支持 dashscope、deepseek、openai-compatible");
+        String canonicalProvider = "openai".equals(provider) ? "openai-compatible" : provider;
+        String apiKey = resolveApiKey(canonicalProvider);
+        String baseUrl = resolvedBaseUrl(canonicalProvider);
+        String model = resolvedModelName(canonicalProvider);
+        logger.info("创建 Responses ChatModel: provider={}, baseUrl={}, model={}", canonicalProvider, baseUrl, model);
+        return new ResponsesChatModel(objectMapper, canonicalProvider, baseUrl, apiKey, model,
+                temperature, maxToken, topP, resolvedTimeout());
     }
 
     /** 使用统一配置创建普通聊天模型。 */
@@ -160,72 +104,45 @@ public class ChatService {
 
     private String resolvedModelName(String provider) {
         if ("dashscope".equals(provider)) {
-            return firstNonBlank(aiModelProperties.getModel(), chatModelName);
+            return firstNonBlank(aiModelProperties.getModel(),
+                    System.getenv("DASHSCOPE_CHAT_MODEL"), "qwen3.8-flash");
         }
         if ("deepseek".equals(provider)) {
-            return firstNonBlank(aiModelProperties.getModel(), "deepseek-chat");
+            return firstNonBlank(aiModelProperties.getModel(),
+                    System.getenv("DEEPSEEK_MODEL"), "deepseek-flash");
         }
-        return firstNonBlank(aiModelProperties.getModel(), "gpt-4o-mini");
+        return firstNonBlank(aiModelProperties.getModel(),
+                System.getenv("AI_MODEL_NAME"), "gpt-4o-mini");
     }
 
     private String resolvedBaseUrl(String provider) {
         if ("dashscope".equals(provider)) {
-            return multiModel
-                    ? MULTIMODAL_GENERATION_RESTFUL_URL
-                    : "https://dashscope.aliyuncs.com/api/v1";
+            return firstNonBlank(aiModelProperties.getBaseUrl(),
+                    System.getenv("DASHSCOPE_BASE_URL"),
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1");
         }
         if ("deepseek".equals(provider)) {
-            return firstNonBlank(aiModelProperties.getBaseUrl(), "https://api.deepseek.com");
+            return firstNonBlank(aiModelProperties.getBaseUrl(),
+                    System.getenv("DEEPSEEK_BASE_URL"), "https://api.deepseek.com");
         }
-        return firstNonBlank(aiModelProperties.getBaseUrl(), "https://api.openai.com");
+        return firstNonBlank(aiModelProperties.getBaseUrl(),
+                "https://api.openai.com/v1");
     }
 
-    private DeepSeekChatModel createDeepSeekChatModel(double temperature, int maxToken, double topP) {
+    private String resolveApiKey(String provider) {
         String apiKey = firstNonBlank(aiModelProperties.getApiKey(),
-                System.getenv("DEEPSEEK_API_KEY"));
-        if (apiKey == null) {
-            throw new IllegalStateException("DeepSeek API Key 未配置，请设置 ai.model.api-key 或 DEEPSEEK_API_KEY");
-        }
-        String baseUrl = firstNonBlank(aiModelProperties.getBaseUrl(), "https://api.deepseek.com");
-        String model = firstNonBlank(aiModelProperties.getModel(), "deepseek-chat");
-        logger.info("创建 DeepSeek ChatModel: baseUrl={}, model={}", baseUrl, model);
-        DeepSeekApi api = DeepSeekApi.builder()
-                .apiKey(apiKey)
-                .baseUrl(baseUrl)
-                .build();
-        return DeepSeekChatModel.builder()
-                .deepSeekApi(api)
-                .defaultOptions(DeepSeekChatOptions.builder()
-                        .model(model)
-                        .temperature(temperature)
-                        .maxTokens(maxToken)
-                        .topP(topP)
-                        .build())
-                .build();
-    }
-
-    private OpenAiChatModel createOpenAiCompatibleChatModel(double temperature, int maxToken, double topP) {
-        String apiKey = firstNonBlank(aiModelProperties.getApiKey(),
+                "dashscope".equals(provider) ? System.getenv("DASHSCOPE_API_KEY") : null,
+                "deepseek".equals(provider) ? System.getenv("DEEPSEEK_API_KEY") : null,
                 System.getenv("AI_MODEL_API_KEY"));
         if (apiKey == null) {
-            throw new IllegalStateException("OpenAI-compatible API Key 未配置，请设置 ai.model.api-key 或 AI_MODEL_API_KEY");
+            throw new IllegalStateException("Responses API Key 未配置，请设置 ai.model.api-key 或对应供应商环境变量");
         }
-        String baseUrl = firstNonBlank(aiModelProperties.getBaseUrl(), "https://api.openai.com");
-        String model = firstNonBlank(aiModelProperties.getModel(), "gpt-4o-mini");
-        logger.info("创建 OpenAI-compatible ChatModel: baseUrl={}, model={}", baseUrl, model);
-        OpenAiApi api = OpenAiApi.builder()
-                .apiKey(apiKey)
-                .baseUrl(baseUrl)
-                .build();
-        return OpenAiChatModel.builder()
-                .openAiApi(api)
-                .defaultOptions(OpenAiChatOptions.builder()
-                        .model(model)
-                        .temperature(temperature)
-                        .maxTokens(maxToken)
-                        .topP(topP)
-                        .build())
-                .build();
+        return apiKey;
+    }
+
+    private Duration resolvedTimeout() {
+        return aiModelProperties.getTimeout() == null
+                ? Duration.ofSeconds(180) : aiModelProperties.getTimeout();
     }
 
     /**
@@ -315,8 +232,13 @@ public class ChatService {
         return value == null || value.isBlank() ? fallback : value.trim().toLowerCase();
     }
 
-    private String firstNonBlank(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value.trim();
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return null;
     }
 
     /**

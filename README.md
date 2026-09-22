@@ -115,16 +115,25 @@ milvus:
   host: localhost
   port: 19530
 
-# 阿里云 DashScope
-spring:
-  ai:
-    dashscope:
-      api-key: "${DASHSCOPE_API_KEY}" // 环境变量
+# 对话和 AI Ops 统一使用 Responses API
+ai:
+  model:
+    provider: ${AI_MODEL_PROVIDER:deepseek}
+    api-key: ${AI_MODEL_API_KEY:}
+    base-url: ${AI_MODEL_BASE_URL:}
+    model: ${AI_MODEL_NAME:deepseek-flash}
+    timeout: ${AI_MODEL_TIMEOUT:180s}
 
-# RAG 配置
+# DashScope 仅用于 Embedding
+dashscope:
+  api:
+    key: ${DASHSCOPE_API_KEY:}
+  embedding:
+    model: text-embedding-v4
+
+# RAG 检索配置
 rag:
   top-k: 3
-  model: "qwen3-max"
 
 # 文档分片
 document:
@@ -136,7 +145,10 @@ document:
 ### 环境变量
 
 ```bash
-export DASHSCOPE_API_KEY=your-api-key
+export AI_MODEL_PROVIDER=deepseek
+export AI_MODEL_API_KEY=your-deepseek-key
+export AI_MODEL_NAME=deepseek-flash
+export DASHSCOPE_API_KEY=your-dashscope-key  # Embedding
 ```
 
 
@@ -145,8 +157,10 @@ export DASHSCOPE_API_KEY=your-api-key
 ### 1. 环境准备
 
 ```bash
-# 设置 API Key
-export DASHSCOPE_API_KEY=your-api-key
+# 设置对话/AI Ops API Key
+export AI_MODEL_API_KEY=your-api-key
+# 设置 DashScope Embedding API Key
+export DASHSCOPE_API_KEY=your-dashscope-key
 ```
 
 ### 2. 启动应用
