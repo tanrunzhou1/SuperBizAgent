@@ -28,29 +28,43 @@ import java.util.TreeSet;
 @Component
 public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
     private static final List<ToolSpec> TOOL_SPECS = List.of(
-            // 让模型稳定生成 JSON object；回放时仍固定命中官方 GetAlerts:{} 缓存键。
-            new ToolSpec("GetAlerts", "获取案例中的告警和异常指标摘要（可选 namespace/service_name）", objectSchema(Map.of(
-                    "namespace", stringSchema(), "service_name", stringSchema()))),
-            new ToolSpec("GetRecentLogs", "获取案例中的近期原始日志", objectSchema(Map.of(
-                    "namespace", stringSchema(), "service_name", stringSchema(), "lines", numberSchema()))),
-            new ToolSpec("GetErrorLogs", "获取案例中的错误日志摘要", objectSchema(Map.of(
-                    "namespace", stringSchema(), "service_name", stringSchema()))),
+            // Cloud-OpsBench 官方 GetAlerts 无参数，回放时固定命中 GetAlerts:{} 缓存键。
+            new ToolSpec("GetAlerts", "获取案例中的告警和异常指标摘要。该工具不需要参数。", emptyObjectSchema()),
+            // 官方签名只有 namespace 和 service_name；日志行数由快照工具内部处理。
+            new ToolSpec("GetRecentLogs", "获取指定 Kubernetes 服务的近期原始日志。", objectSchema(
+                    Map.of("namespace", stringSchema("必填。Kubernetes namespace。"),
+                            "service_name", stringSchema("必填。微服务名称，不是 Pod 完整名称。")),
+                    "namespace", "service_name")),
+            new ToolSpec("GetErrorLogs", "获取指定 Kubernetes 服务的错误日志统计摘要。", objectSchema(
+                    Map.of("namespace", stringSchema("必填。Kubernetes namespace。"),
+                            "service_name", stringSchema("必填。微服务名称。")),
+                    "namespace", "service_name")),
             new ToolSpec("GetResources", "查询案例中的 Kubernetes 资源状态", ""),
-            new ToolSpec("DescribeResource", "查看案例中的 Kubernetes 资源详情", objectSchema(Map.of(
-                    "namespace", stringSchema(), "resource_type", stringSchema(), "name", stringSchema()))),
-            new ToolSpec("GetAppYAML", "获取案例中的应用配置 YAML", objectSchema(Map.of(
-                    "app_name", stringSchema()))),
-            new ToolSpec("GetServiceDependencies", "获取案例中的服务依赖关系", objectSchema(Map.of(
-                    "service_name", stringSchema()))),
-            new ToolSpec("CheckServiceConnectivity", "检查案例中的服务连通性", objectSchema(Map.of(
-                    "namespace", stringSchema(), "service_name", stringSchema(), "port", numberSchema()))),
+            new ToolSpec("DescribeResource", "查看指定 Kubernetes 资源的详细状态、事件和条件。", objectSchema(
+                    Map.of("namespace", stringSchema("可选。namespaced 资源应提供 namespace。"),
+                            "resource_type", stringSchema("必填。资源类型，例如 pod、service、deployment。"),
+                            "name", stringSchema("必填。要查看的资源精确名称。")),
+                    "resource_type", "name")),
+            new ToolSpec("GetAppYAML", "获取指定微服务的应用配置 YAML。", objectSchema(
+                    Map.of("app_name", stringSchema("必填。要查看配置的微服务名称。")), "app_name")),
+            new ToolSpec("GetServiceDependencies", "获取指定服务的上下游服务依赖关系。", objectSchema(
+                    Map.of("service_name", stringSchema("必填。服务名称。")), "service_name")),
+            new ToolSpec("CheckServiceConnectivity", "检查指定服务端口的集群内 TCP 连通性。", objectSchema(
+                    Map.of("namespace", stringSchema("必填。Kubernetes namespace。"),
+                            "service_name", stringSchema("必填。目标 Service DNS 名称。"),
+                            "port", numberSchema("必填。目标 TCP 端口。")),
+                    "service_name", "port", "namespace")),
             new ToolSpec("GetClusterConfiguration", "获取案例中的集群节点状态和配置", emptyObjectSchema()),
-            new ToolSpec("CheckNodeServiceStatus", "查询案例中指定节点的系统组件状态", objectSchema(Map.of(
-                    "node_name", stringSchema(), "service_name", stringSchema()))),
-            new ToolSpec("ListCodeFiles", "列出案例中指定 Boutique 微服务的源码文件", objectSchema(Map.of(
-                    "app_name", stringSchema()))),
-            new ToolSpec("GetSourceCode", "读取案例中已列出的源码文件", objectSchema(Map.of(
-                    "app_name", stringSchema(), "file_path", stringSchema())))
+            new ToolSpec("CheckNodeServiceStatus", "查询指定节点上的系统组件状态。", objectSchema(
+                    Map.of("node_name", enumSchema("节点名称。", "master", "worker-01", "worker-02", "worker-03"),
+                            "service_name", enumSchema("系统组件名称。", "kube-scheduler", "kubelet", "kube-proxy", "containerd")),
+                    "node_name", "service_name")),
+            new ToolSpec("ListCodeFiles", "列出 Boutique 微服务的源码文件。", objectSchema(
+                    Map.of("app_name", stringSchema("必填。Boutique 微服务名称。")), "app_name")),
+            new ToolSpec("GetSourceCode", "读取已通过 ListCodeFiles 列出的源码文件。", objectSchema(
+                    Map.of("app_name", stringSchema("必填。Boutique 微服务名称。"),
+                            "file_path", stringSchema("必填。必须是 ListCodeFiles 返回的相对路径。")),
+                    "app_name", "file_path"))
     );
 
     private static final Set<String> BOUTIQUE_CODE_SERVICES = Set.of(
@@ -89,6 +103,9 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
                 || context.getCaseId().startsWith("boutique/codedefect/");
         return TOOL_SPECS.stream()
                 .filter(spec -> boutique || !BOUTIQUE_ONLY_TOOLS.contains(spec.name()))
+                // Replay 模式只向模型暴露当前快照真正支持的工具，避免模型调用
+                // 没有对应 tool_cache 的工具（例如某些案例不存在 GetClusterConfiguration）。
+                .filter(spec -> isReplayToolAvailable(spec.name(), benchmarkCase))
                 .map(spec -> "GetResources".equals(spec.name())
                         ? new ToolSpec(spec.name(), spec.description(), getResourcesSchema(getResourcesV2))
                         : spec)
@@ -260,17 +277,32 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
 
     private static String getResourcesSchema(boolean v2) {
         Map<String, String> properties = new java.util.LinkedHashMap<>();
-        properties.put("resource_type", stringSchema());
-        properties.put("namespace", stringSchema());
-        properties.put("name", stringSchema());
-        properties.put("show_labels", booleanSchema());
-        properties.put("output_wide", booleanSchema());
+        properties.put("resource_type", stringSchema("必填。资源类型，例如 pods、services、deployments、endpoints。"));
+        properties.put("namespace", stringSchema("可选。namespaced 资源建议提供 namespace；集群级资源可省略。"));
+        properties.put("name", stringSchema("可选。资源名称；省略时返回列表。"));
+        properties.put("show_labels", booleanSchema("可选。是否显示 labels，不能与 output_wide 同时为 true。"));
+        properties.put("output_wide", booleanSchema("可选。是否输出 wide 信息，不能与 show_labels 同时为 true。"));
         if (v2) {
-            properties.put("output_yaml", booleanSchema());
+            properties.put("output_yaml", booleanSchema("可选。是否返回 YAML；仅支持官方允许的资源类型。"));
         } else {
-            properties.put("label_selector", stringSchema());
+            properties.put("label_selector", stringSchema("可选。简单 key=value 标签选择器。"));
         }
-        return objectSchema(properties);
+        return objectSchema(properties, "resource_type");
+    }
+
+    private boolean isReplayToolAvailable(String toolName, CloudOpsBenchCase benchmarkCase) {
+        if ("GetAlerts".equals(toolName)) {
+            return benchmarkCase.getToolCache().keySet().stream()
+                    .anyMatch(key -> key.startsWith("GetAlerts:"));
+        }
+        if ("GetRecentLogs".equals(toolName)) {
+            return benchmarkCase.getRawLogs() != null && !benchmarkCase.getRawLogs().isEmpty();
+        }
+        if ("ListCodeFiles".equals(toolName) || "GetSourceCode".equals(toolName)) {
+            return true;
+        }
+        return benchmarkCase.getToolCache().keySet().stream()
+                .anyMatch(key -> key.startsWith(toolName + ":"));
     }
 
     private String requireFields(JsonNode input, String... fields) {
@@ -479,7 +511,7 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
         return result.toString();
     }
 
-    private static String objectSchema(Map<String, String> properties) {
+    private static String objectSchema(Map<String, String> properties, String... required) {
         StringBuilder builder = new StringBuilder("{\"type\":\"object\",\"properties\":{");
         boolean first = true;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -489,23 +521,62 @@ public class ReplayAiOpsToolProvider implements AiOpsToolProvider {
             first = false;
             builder.append('"').append(entry.getKey()).append("\":").append(entry.getValue());
         }
-        return builder.append("}}").toString();
+        builder.append('}');
+        if (required.length > 0) {
+            builder.append(",\"required\":[");
+            for (int index = 0; index < required.length; index++) {
+                if (index > 0) {
+                    builder.append(',');
+                }
+                builder.append('"').append(required[index]).append('"');
+            }
+            builder.append(']');
+        }
+        return builder.append(",\"additionalProperties\":false}").toString();
     }
 
     private static String stringSchema() {
         return "{\"type\":\"string\"}";
     }
 
+    private static String stringSchema(String description) {
+        return "{\"type\":\"string\",\"description\":\"" + escapeJson(description) + "\"}";
+    }
+
+    private static String enumSchema(String description, String... values) {
+        StringBuilder builder = new StringBuilder("{\"type\":\"string\",\"enum\":[");
+        for (int index = 0; index < values.length; index++) {
+            if (index > 0) {
+                builder.append(',');
+            }
+            builder.append('"').append(values[index]).append('"');
+        }
+        return builder.append("],\"description\":\"")
+                .append(escapeJson(description)).append("\"}").toString();
+    }
+
     private static String booleanSchema() {
         return "{\"type\":\"boolean\"}";
+    }
+
+    private static String booleanSchema(String description) {
+        return "{\"type\":\"boolean\",\"description\":\"" + escapeJson(description) + "\"}";
     }
 
     private static String numberSchema() {
         return "{\"type\":\"integer\"}";
     }
 
+    private static String numberSchema(String description) {
+        return "{\"type\":\"integer\",\"description\":\"" + escapeJson(description) + "\"}";
+    }
+
+    private static String escapeJson(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     private static String emptyObjectSchema() {
-        return "{\"type\":\"object\",\"properties\":{}}";
+        return "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
     }
 
     private record ToolSpec(String name, String description, String inputSchema) {
