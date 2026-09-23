@@ -22,6 +22,7 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -63,18 +64,24 @@ public class AiOpsService {
      */
     public Optional<OverAllState> executeAiOpsAnalysis(ChatModel chatModel,
             ToolCallback[] toolCallbacks, AiOpsRunContext runContext) throws GraphRunnerException {
+        return executeAiOpsAnalysis(chatModel, toolCallbacks, runContext, Map.of());
+    }
+
+    public Optional<OverAllState> executeAiOpsAnalysis(ChatModel chatModel,
+            ToolCallback[] toolCallbacks, AiOpsRunContext runContext,
+            Map<String, String> prompts) throws GraphRunnerException {
         logger.info("开始执行 AI Ops 多 Agent 协作流程");
 
         // 构建 Planner 和 Executor Agent
-        ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks, runContext);
-        ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks, runContext);
+        ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks, runContext, prompts);
+        ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks, runContext, prompts);
 
         // 构建 Supervisor Agent
         SupervisorAgent supervisorAgent = SupervisorAgent.builder()
                 .name("ai_ops_supervisor")
                 .description("负责调度 Planner 与 Executor 的多 Agent 控制器")
                 .model(chatModel)
-                .systemPrompt(buildSupervisorSystemPrompt())
+                .systemPrompt(promptOrDefault(prompts, "supervisor", buildSupervisorSystemPrompt()))
                 .subAgents(List.of(plannerAgent, executorAgent))
                 .compileConfig(compileConfig(runContext))
                 .build();
@@ -140,12 +147,12 @@ public class AiOpsService {
      * 构建 Planner Agent
      */
     private ReactAgent buildPlannerAgent(ChatModel chatModel, ToolCallback[] toolCallbacks,
-            AiOpsRunContext runContext) {
+            AiOpsRunContext runContext, Map<String, String> prompts) {
         return ReactAgent.builder()
                 .name("planner_agent")
                 .description("负责拆解告警、规划与再规划步骤")
                 .model(chatModel)
-                .systemPrompt(buildPlannerPrompt())
+                .systemPrompt(promptOrDefault(prompts, "planner", buildPlannerPrompt()))
                 .methodTools(buildMethodToolsArray(runContext))
                 .tools(toolCallbacks)
                 .compileConfig(compileConfig(runContext))
@@ -157,12 +164,12 @@ public class AiOpsService {
      * 构建 Executor Agent
      */
     private ReactAgent buildExecutorAgent(ChatModel chatModel, ToolCallback[] toolCallbacks,
-            AiOpsRunContext runContext) {
+            AiOpsRunContext runContext, Map<String, String> prompts) {
         return ReactAgent.builder()
                 .name("executor_agent")
                 .description("负责执行 Planner 的首个步骤并及时反馈")
                 .model(chatModel)
-                .systemPrompt(buildExecutorPrompt())
+                .systemPrompt(promptOrDefault(prompts, "executor", buildExecutorPrompt()))
                 .methodTools(buildMethodToolsArray(runContext))
                 .tools(toolCallbacks)
                 .compileConfig(compileConfig(runContext))
@@ -349,5 +356,18 @@ public class AiOpsService {
                 只允许在 planner_agent、executor_agent 与 FINISH 之间做出选择。
 
                 """;
+    }
+
+    Map<String, String> defaultPromptConfig() {
+        return Map.of(
+                "planner", buildPlannerPrompt(),
+                "executor", buildExecutorPrompt(),
+                "supervisor", buildSupervisorSystemPrompt());
+    }
+
+    private String promptOrDefault(Map<String, String> prompts, String key, String fallback) {
+        if (prompts == null) return fallback;
+        String value = prompts.get(key);
+        return value == null || value.isBlank() ? fallback : value;
     }
 }

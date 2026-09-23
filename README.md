@@ -153,7 +153,9 @@ document:
 
 SQLite 数据库不会在应用启动时自动执行建表或升级脚本。首次启动前请手动执行
 [`src/main/resources/db/V1_init.sql`](/Users/runzhou.tan/Desktop/MyProject/SuperBizAgent/src/main/resources/db/V1_init.sql)。
-后续数据库变更脚本按 `V2_xxx.sql`、`V3_xxx.sql` 顺序维护，并由发布人员手动执行和记录。
+统一会话、AIOps 消息和 Agent 配置升级由
+[`src/main/resources/db/V2_unified_agent_workspace.sql`](/Users/runzhou.tan/Desktop/MyProject/SuperBizAgent/src/main/resources/db/V2_unified_agent_workspace.sql)
+提供；已有数据库执行 V2 后再启动新版应用。后续数据库变更脚本按 `V3_xxx.sql` 顺序维护，并由发布人员手动执行和记录。
 
 ### 环境变量
 

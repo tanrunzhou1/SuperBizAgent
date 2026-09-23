@@ -52,11 +52,16 @@ public class AiOpsRunService {
 
     public AiOpsRunResult run(ChatModel chatModel, AiOpsRunContext context)
             throws Exception {
+        return run(chatModel, context, java.util.Map.of());
+    }
+
+    public AiOpsRunResult run(ChatModel chatModel, AiOpsRunContext context,
+            java.util.Map<String, String> prompts) throws Exception {
         ToolCallback[] toolCallbacks = providerFor(context).getToolCallbacks(context);
         AiOpsRunTrace trace = new AiOpsRunTrace(context.getRunId());
         AiOpsStepBudget stepBudget = new AiOpsStepBudget(context == null ? 20 : context.getMaxSteps());
         ToolCallback[] tracedCallbacks = wrapToolCallbacks(toolCallbacks, trace, stepBudget);
-        Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(chatModel, tracedCallbacks, context);
+        Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(chatModel, tracedCallbacks, context, prompts);
         if (state.isEmpty()) {
             throw new IllegalStateException("多 Agent 编排未获取到有效结果");
         }

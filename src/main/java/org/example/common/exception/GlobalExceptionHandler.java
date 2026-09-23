@@ -36,6 +36,18 @@ public class GlobalExceptionHandler {
         return response(exception.getErrorCode(), exception.getMessage(), exception, request);
     }
 
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ApiResponse<Void>> handleIllegalArgument(IllegalArgumentException exception,
+            HttpServletRequest request) {
+        return response(ErrorCode.INVALID_REQUEST, exception.getMessage(), exception, request);
+    }
+
+    @ExceptionHandler(IllegalStateException.class)
+    public ResponseEntity<ApiResponse<Void>> handleIllegalState(IllegalStateException exception,
+            HttpServletRequest request) {
+        return response(ErrorCode.BUSINESS_ERROR, exception.getMessage(), exception, request);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleException(Exception exception, HttpServletRequest request) {
         return response(ErrorCode.SYSTEM_ERROR, ErrorCode.SYSTEM_ERROR.getMessage(), exception, request);
