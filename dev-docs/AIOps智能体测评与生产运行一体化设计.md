@@ -251,7 +251,7 @@ Agent 只可得到案例问题和通过回放工具获取的观测数据。这�
 ### 阶段二：单案例回放
 
 1. 新增 `ReplayAiOpsToolProvider`。
-2. 对接 Cloud-OpsBench 的一个案例，例如 `trainticket/runtime/61`。
+2. 对接 Cloud-OpsBench 的一个案例，例如 `trainticket/runtime/2`。
 3. 实现告警、日志、Kubernetes 资源和配置的回放工具。
 4. 新增单案例测评接口。
 
