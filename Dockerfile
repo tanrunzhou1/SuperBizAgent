@@ -8,9 +8,4 @@ RUN mkdir -p /app/config /app/db /app/uploads
 
 EXPOSE 9900
 
-ENTRYPOINT [
-  "java",
-  "-jar",
-  "/app/app.jar",
-  "--spring.config.additional-location=file:/app/config/"
-]
+ENTRYPOINT ["java","-jar","/app/app.jar","--spring.config.additional-location=file:/app/config/"]
