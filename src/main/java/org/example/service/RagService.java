@@ -1,22 +1,17 @@
 package org.example.service;
 
-import com.alibaba.dashscope.aigc.generation.Generation;
-import com.alibaba.dashscope.aigc.generation.GenerationParam;
-import com.alibaba.dashscope.aigc.generation.GenerationResult;
-import com.alibaba.dashscope.common.Message;
-import com.alibaba.dashscope.common.Role;
-import com.alibaba.dashscope.exception.ApiException;
-import com.alibaba.dashscope.exception.InputRequiredException;
-import com.alibaba.dashscope.exception.NoApiKeyException;
-import com.alibaba.dashscope.utils.Constants;
-import io.reactivex.Flowable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.stereotype.Service;
 
-import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -33,28 +28,11 @@ public class RagService {
     @Autowired
     private VectorSearchService vectorSearchService;
 
-    @Value("${dashscope.api.key}")
-    private String apiKey;
+    @Autowired
+    private ChatService chatService;
 
     @Value("${rag.top-k:3}")
     private int topK;
-
-    @Value("${rag.model:qwen3-30b-a3b-thinking-2507}")
-    private String model;
-
-    private Generation generation;
-
-    @PostConstruct
-    public void init() {
-        // 设置 API Key 和 Base URL
-        Constants.apiKey = apiKey;
-        Constants.baseHttpApiUrl = "https://dashscope.aliyuncs.com/api/v1";
-        
-        // 创建 Generation 实例
-        generation = new Generation();
-        
-        logger.info("RAG 服务初始化完成，model: {}, topK: {}", model, topK);
-    }
 
     /**
      * 流式处理用户问题（不带历史消息）
@@ -138,86 +116,38 @@ public class RagService {
      * @param history 历史消息列表
      * @param callback 流式回调接口
      */
-    private void generateAnswerStream(String prompt, List<Map<String, String>> history, StreamCallback callback) 
-            throws NoApiKeyException, ApiException, InputRequiredException {
-        
-        // 构建消息列表：历史消息 + 当前问题
+    private void generateAnswerStream(String prompt, List<Map<String, String>> history, StreamCallback callback) {
         List<Message> messages = new ArrayList<>();
-        
-        // 添加历史消息
         for (Map<String, String> historyMsg : history) {
             String role = historyMsg.get("role");
             String content = historyMsg.get("content");
             
             if ("user".equals(role)) {
-                messages.add(Message.builder()
-                        .role(Role.USER.getValue())
-                        .content(content)
-                        .build());
+                messages.add(new UserMessage(content));
             } else if ("assistant".equals(role)) {
-                messages.add(Message.builder()
-                        .role(Role.ASSISTANT.getValue())
-                        .content(content)
-                        .build());
+                messages.add(new AssistantMessage(content));
             }
         }
-        
-        // 添加当前用户问题
-        Message userMsg = Message.builder()
-                .role(Role.USER.getValue())
-                .content(prompt)
-                .build();
-        messages.add(userMsg);
-        
-        logger.debug("发送给AI模型的消息数量: {}（包含 {} 条历史消息）", 
-            messages.size(), history.size());
+        messages.add(new UserMessage(prompt));
 
-        GenerationParam param = GenerationParam.builder()
-                .apiKey(apiKey)
-                .model(model)
-                .incrementalOutput(true)
-                .resultFormat("message")
-                .messages(messages)
-                .build();
-
-        logger.info("开始调用AI模型流式接口...");
-        
-        Flowable<GenerationResult> result = generation.streamCall(param);
-        
-        StringBuilder reasoningContent = new StringBuilder();
+        logger.debug("发送给统一 Responses API 的消息数量: {}（包含 {} 条历史消息）",
+                messages.size(), history.size());
+        ChatModel chatModel = chatService.createStandardChatModel();
         StringBuilder finalContent = new StringBuilder();
-        
-        logger.info("开始接收AI模型流式响应...");
-
-        result.blockingForEach(message -> {
-            if (message.getOutput() != null && 
-                message.getOutput().getChoices() != null && 
-                !message.getOutput().getChoices().isEmpty()) {
-                
-                // 获取消息内容
-                // 注意：qwen3-30b-a3b-thinking-2507 模型会在 content 中返回完整内容
-                // reasoning 部分可能需要通过特殊方式提取或者直接包含在 content 中
-                String content = message.getOutput().getChoices().get(0).getMessage().getContent();
-
-                if (content != null && !content.isEmpty()) {
-                    logger.debug("收到AI模型内容块: {}", content);
-                    
-                    // 对于 thinking 模型，content 可能包含思考过程和最终答案
-                    // 这里我们将所有内容都作为答案返回
-                    finalContent.append(content);
-                    callback.onContentChunk(content);
-                    
-                    logger.debug("已调用 onContentChunk 回调");
-                } else {
-                    logger.debug("收到空内容块，跳过");
-                }
-            }
-        });
-        
-        logger.info("AI模型流式响应完成，总内容长度: {}", finalContent.length());
-
-        callback.onComplete(finalContent.toString(), reasoningContent.toString());
-        logger.info("已调用 onComplete 回调");
+        chatModel.stream(new Prompt(messages))
+                .doOnNext(response -> {
+                    ChatResponse safeResponse = response;
+                    if (safeResponse != null && safeResponse.getResult() != null
+                            && safeResponse.getResult().getOutput() != null) {
+                        String content = safeResponse.getResult().getOutput().getText();
+                        if (content != null && !content.isEmpty()) {
+                            finalContent.append(content);
+                            callback.onContentChunk(content);
+                        }
+                    }
+                })
+                .blockLast();
+        callback.onComplete(finalContent.toString(), "");
     }
 
     /**

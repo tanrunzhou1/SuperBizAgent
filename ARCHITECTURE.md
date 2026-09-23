@@ -91,7 +91,7 @@ SuperBizAgent/
 │   │
 │   ├── service/                           # 服务层（业务逻辑）
 │   │   ├── ChatService.java               # 对话服务 ⭐
-│   │   │   ├── 创建 DashScope API 和 ChatModel
+│   │   │   ├── 创建统一 Responses API ChatModel
 │   │   │   ├── 构建系统提示词（含历史消息）
 │   │   │   ├── 创建 ReactAgent
 │   │   │   └── 执行对话和工具调用
@@ -211,7 +211,7 @@ SuperBizAgent/
    - 添加历史对话消息
     ↓
 3. 调用大语言模型（RagService）
-   - 使用 DashScope API（qwen3-max 模型）
+   - 使用统一 Responses API（由 ai.model.provider 决定供应商和模型）
    - 流式输出答案
     ↓
 4. 返回结果
@@ -567,22 +567,35 @@ milvus:
   timeout: 10000               # 超时时间（毫秒）
 ```
 
-#### DashScope 配置
+#### SQLite 业务数据库
+
+聊天记录和工具调用审计使用本地 SQLite 文件。应用启动时只创建数据库目录并打开连接，
+不会自动执行建表或升级脚本。
 
 ```yaml
 spring:
-  ai:
-    dashscope:
-      api-key: "${DASHSCOPE_API_KEY}"  # API Key（环境变量）
-      chat:
-        options:
-          timeout: 180000      # 超时时间（180 秒）
-      retry:
-        max-attempts: 3        # 最大重试次数
-        backoff:
-          initial-interval: 2000   # 初始间隔 2 秒
-          multiplier: 2            # 间隔倍数
-          max-interval: 10000      # 最大间隔 10 秒
+  datasource:
+    url: jdbc:sqlite:./db/super-biz-agent.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+      connection-timeout: 10000
+```
+
+SQLite 文件固定为 `./db/super-biz-agent.db`，不使用外部数据库或自动迁移流程。
+初始化脚本为 `src/main/resources/db/V1_init.sql`，由发布人员手动执行；后续变更按
+`V2_xxx.sql`、`V3_xxx.sql` 顺序维护并手动执行。
+
+#### 统一 Responses API 配置
+
+```yaml
+ai:
+  model:
+    provider: ${AI_MODEL_PROVIDER:deepseek}
+    api-key: ${AI_MODEL_API_KEY:}
+    base-url: ${AI_MODEL_BASE_URL:}
+    model: ${AI_MODEL_NAME:deepseek-flash}
+    timeout: ${AI_MODEL_TIMEOUT:180s}
 ```
 
 #### RAG 配置
@@ -590,9 +603,10 @@ spring:
 ```yaml
 rag:
   top-k: 3                   # 检索返回的最相似文档数
-  model: "qwen3-max"         # 大语言模型名称
 
 dashscope:
+  api:
+    key: ${DASHSCOPE_API_KEY:}  # 仅用于 Embedding
   embedding:
     model: "text-embedding-v4"  # 嵌入模型
 ```
@@ -628,7 +642,7 @@ document:
 
 | 服务 | 模型 | 用途 |
 |------|------|------|
-| DashScope Chat | qwen3-max | 智能对话生成 |
+| Responses API | deepseek-flash / qwen3.8-flash | 智能对话与 AI Ops |
 | DashScope Embedding | text-embedding-v4 | 文本向量化（1024 维） |
 
 ### 5.3 外部集成
@@ -753,11 +767,14 @@ public class CustomTool {
 
 ### 9.2 模型切换
 
-通过配置文件切换 AI 模型：
+通过统一配置切换 AI 模型：
 
 ```yaml
-rag:
-  model: "qwen3-max"  # 可切换为其他模型
+ai:
+  model:
+    provider: deepseek
+    model: deepseek-flash
+    base-url: https://api.deepseek.com
 ```
 
 ### 9.3 向量库扩展

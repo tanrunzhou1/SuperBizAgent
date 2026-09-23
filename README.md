@@ -115,16 +115,34 @@ milvus:
   host: localhost
   port: 19530
 
-# 阿里云 DashScope
+# SQLite 业务数据库（聊天记录与工具调用审计）
 spring:
-  ai:
-    dashscope:
-      api-key: "${DASHSCOPE_API_KEY}" // 环境变量
+  datasource:
+    url: jdbc:sqlite:./db/super-biz-agent.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+      connection-timeout: 10000
 
-# RAG 配置
+# 对话和 AI Ops 统一使用 Responses API
+ai:
+  model:
+    provider: ${AI_MODEL_PROVIDER:deepseek}
+    api-key: ${AI_MODEL_API_KEY:}
+    base-url: ${AI_MODEL_BASE_URL:}
+    model: ${AI_MODEL_NAME:deepseek-flash}
+    timeout: ${AI_MODEL_TIMEOUT:180s}
+
+# DashScope 仅用于 Embedding
+dashscope:
+  api:
+    key: ${DASHSCOPE_API_KEY:}
+  embedding:
+    model: text-embedding-v4
+
+# RAG 检索配置
 rag:
   top-k: 3
-  model: "qwen3-max"
 
 # 文档分片
 document:
@@ -133,10 +151,17 @@ document:
     overlap: 100
 ```
 
+SQLite 数据库不会在应用启动时自动执行建表或升级脚本。首次启动前请手动执行
+[`src/main/resources/db/V1_init.sql`](/Users/runzhou.tan/Desktop/MyProject/SuperBizAgent/src/main/resources/db/V1_init.sql)。
+后续数据库变更脚本按 `V2_xxx.sql`、`V3_xxx.sql` 顺序维护，并由发布人员手动执行和记录。
+
 ### 环境变量
 
 ```bash
-export DASHSCOPE_API_KEY=your-api-key
+export AI_MODEL_PROVIDER=deepseek
+export AI_MODEL_API_KEY=your-deepseek-key
+export AI_MODEL_NAME=deepseek-flash
+export DASHSCOPE_API_KEY=your-dashscope-key  # Embedding
 ```
 
 
@@ -145,8 +170,10 @@ export DASHSCOPE_API_KEY=your-api-key
 ### 1. 环境准备
 
 ```bash
-# 设置 API Key
-export DASHSCOPE_API_KEY=your-api-key
+# 设置对话/AI Ops API Key
+export AI_MODEL_API_KEY=your-api-key
+# 设置 DashScope Embedding API Key
+export DASHSCOPE_API_KEY=your-dashscope-key
 ```
 
 ### 2. 启动应用

@@ -1,30 +1,31 @@
 package org.example.controller;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.graph.NodeOutput;
-import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
+import org.example.common.aiops.AiOpsRunMode;
 import org.example.common.api.ApiError;
 import org.example.common.api.ApiResponse;
 import org.example.common.api.ChatSessionContext;
 import org.example.common.api.SseMessage;
 import org.example.common.api.TraceIdContext;
+import org.example.common.aiops.AiOpsRunContext;
+import org.example.common.aiops.AiOpsRunResult;
 import org.example.common.exception.AppException;
 import org.example.common.exception.BusinessException;
 import org.example.common.exception.ErrorCode;
-import org.example.service.AiOpsService;
 import org.example.service.ChatService;
 import org.example.service.ChatSessionService;
+import org.example.service.AiOpsRunService;
+import org.example.dto.AIOpsRequest;
+import org.example.dto.AIOpsResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -47,16 +48,13 @@ public class ChatController {
     private static final Logger logger = LoggerFactory.getLogger(ChatController.class);
 
     @Autowired
-    private AiOpsService aiOpsService;
-    
-    @Autowired
     private ChatService chatService;
 
     @Autowired
-    private ChatSessionService chatSessionService;
+    private AiOpsRunService aiOpsRunService;
 
     @Autowired
-    private ToolCallbackProvider tools;
+    private ChatSessionService chatSessionService;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
@@ -79,8 +77,7 @@ public class ChatController {
         ChatSessionContext.set(sessionId);
         try {
 
-        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-        DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+        ChatModel chatModel = chatService.createStandardChatModel();
 
         chatService.logAvailableTools();
 
@@ -144,9 +141,8 @@ public class ChatController {
                 ChatSessionContext.set(sessionId);
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                // 创建 DashScope API 和 ChatModel
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+                // 根据 ai.model.provider 创建 ChatModel
+                ChatModel chatModel = chatService.createStandardChatModel();
 
                 // 记录可用工具
                 chatService.logAvailableTools();
@@ -256,91 +252,86 @@ public class ChatController {
     }
 
     /**
-     * AI 智能运维接口（SSE 流式模式）- 自动分析告警并生成运维报告
-     * 无需用户输入，自动执行告警分析流程
+     * AI 智能运维接口（SSE 流式模式）。请求体可选，未提供时读取当前活跃告警。
      */
-    @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
-    public SseEmitter aiOps() {
-        SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
+    @PostMapping("/ai_ops")
+    public Object aiOps(@RequestBody(required = false) AIOpsRequest request) {
+        AIOpsRequest safeRequest = request == null ? new AIOpsRequest() : request;
+        AiOpsRunContext context = safeRequest.toRunContext();
+        if (context.getMode() != AiOpsRunMode.LIVE) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "生产接口只允许 LIVE 运行模式");
+        }
+        return safeRequest.shouldStream() ? startAiOpsStream(context) : runAiOpsSync(context);
+    }
 
+    /**
+     * 单案例测评接口。当前从 Cloud-OpsBench 冻结快照执行一个 caseId。
+     */
+    @PostMapping("/ai-ops/evaluations")
+    public Object evaluateAiOps(@RequestBody AIOpsRequest request) {
+        if (request == null || request.getCaseId() == null || request.getCaseId().isBlank()) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "测评接口必须提供 caseId");
+        }
+        request.setMode(AiOpsRunMode.REPLAY);
+        AiOpsRunContext context = request.toRunContext();
+        return request.shouldStream() ? startAiOpsStream(context) : runAiOpsSync(context);
+    }
+
+    private ResponseEntity<ApiResponse<AIOpsResponse>> runAiOpsSync(AiOpsRunContext context) {
+        try {
+            AiOpsRunResult runResult = runAiOps(context);
+            return ResponseEntity.ok(ApiResponse.success(AIOpsResponse.from(runResult)));
+        } catch (Exception exception) {
+            logger.error("AI Ops 非流式执行失败, mode={}, caseId={}", context.getMode(), context.getCaseId(), exception);
+            ErrorCode errorCode = exception instanceof IllegalArgumentException
+                    || exception instanceof UnsupportedOperationException
+                    ? ErrorCode.BUSINESS_ERROR : ErrorCode.MODEL_UNAVAILABLE;
+            throw new BusinessException(errorCode,
+                    "AI Ops 执行失败: " + safeMessage(exception));
+        }
+    }
+
+    private SseEmitter startAiOpsStream(AiOpsRunContext context) {
+        SseEmitter emitter = new SseEmitter(600000L);
         executor.execute(() -> {
             try {
-                logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
+                logger.info("收到 AI Ops 请求 - mode={}, caseId={}, runId={}",
+                        context.getMode(), context.getCaseId(), context.getRunId());
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.content("正在读取告警并拆解任务...\n"), MediaType.APPLICATION_JSON));
 
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createChatModel(dashScopeApi, 0.3, 8000, 0.9);
-
-                ToolCallback[] toolCallbacks = tools.getToolCallbacks();
-
-                emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
-                
-                // 调用 AiOpsService 执行分析流程
-                Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks);
-
-                if (overAllStateOptional.isEmpty()) {
+                AiOpsRunResult runResult = runAiOps(context);
+                String report = runResult.getMarkdownReport();
+                for (int i = 0; i < report.length(); i += 50) {
                     emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.error(ApiError.of(ErrorCode.BUSINESS_ERROR,
-                                    "多 Agent 编排未获取到有效结果")), MediaType.APPLICATION_JSON));
-                    emitter.complete();
-                    return;
+                            .data(SseMessage.content(report.substring(i, Math.min(i + 50, report.length()))),
+                                    MediaType.APPLICATION_JSON));
                 }
-
-                OverAllState state = overAllStateOptional.get();
-                logger.info("AI Ops 编排完成，开始提取最终报告...");
-
-                // 提取最终报告
-                Optional<String> finalReportOptional = aiOpsService.extractFinalReport(state);
-
-                // 输出最终报告
-                if (finalReportOptional.isPresent()) {
-                    String finalReportText = finalReportOptional.get();
-                    logger.info("提取到 Planner 最终报告，长度: {}", finalReportText.length());
-                    
-                    // 发送分隔线
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
-                    
-                    // 发送完整的告警分析报告
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("📋 **告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
-                    
-                    int chunkSize = 50;
-                    for (int i = 0; i < finalReportText.length(); i += chunkSize) {
-                        int end = Math.min(i + chunkSize, finalReportText.length());
-                        String chunk = finalReportText.substring(i, end);
-                        
-                        emitter.send(SseEmitter.event().name("message")
-                                .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
-                    }
-                    
-                    // 发送结束分隔线
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
-                    
-                    logger.info("最终报告已完整输出");
-                } else {
-                    logger.warn("未能提取到 Planner 最终报告");
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成最终报告。"), MediaType.APPLICATION_JSON));
-                }
-
-                emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.done(), MediaType.APPLICATION_JSON));
                 emitter.complete();
-                logger.info("AI Ops 多 Agent 编排完成");
-
-            } catch (Exception e) {
-                logger.error("AI Ops 多 Agent 协作失败", e);
+            } catch (Exception exception) {
+                logger.error("AI Ops 协作失败, mode={}, caseId={}", context.getMode(), context.getCaseId(), exception);
                 try {
                     emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.error(toApiError(e)), MediaType.APPLICATION_JSON));
-                } catch (IOException ex) {
-                    logger.error("发送错误消息失败", ex);
+                            .data(SseMessage.error(toApiError(exception)), MediaType.APPLICATION_JSON));
+                } catch (IOException sendException) {
+                    logger.error("发送 AI Ops 错误消息失败", sendException);
                 }
                 emitter.complete();
             }
         });
-
         return emitter;
+    }
+
+    private AiOpsRunResult runAiOps(AiOpsRunContext context) throws Exception {
+        ChatModel chatModel = chatService.createAiOpsChatModel();
+        return aiOpsRunService.run(chatModel, context);
+    }
+
+    private String safeMessage(Exception exception) {
+        String message = exception.getMessage();
+        return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
     }
 
 
@@ -365,6 +356,9 @@ public class ChatController {
     private ApiError toApiError(Throwable error) {
         if (error instanceof AppException appException) {
             return ApiError.of(appException.getErrorCode(), appException.getMessage());
+        }
+        if (error instanceof UnsupportedOperationException) {
+            return ApiError.of(ErrorCode.BUSINESS_ERROR, error.getMessage());
         }
         logger.error("SSE request failed", error);
         return ApiError.of(ErrorCode.MODEL_UNAVAILABLE);
