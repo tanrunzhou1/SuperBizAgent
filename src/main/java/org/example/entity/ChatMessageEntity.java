@@ -21,5 +21,8 @@ public class ChatMessageEntity {
     private String role;
     private String content;
     private String traceId;
+    private String messageType;
+    private String status;
+    private String runId;
     private LocalDateTime createdAt;
 }

@@ -8,6 +8,7 @@ public enum ErrorCode {
     INVALID_REQUEST(400001, "请求参数不合法", HttpStatus.BAD_REQUEST, false),
     RESOURCE_NOT_FOUND(404001, "请求的资源不存在", HttpStatus.NOT_FOUND, false),
     BUSINESS_ERROR(422001, "业务处理失败", HttpStatus.UNPROCESSABLE_ENTITY, false),
+    SESSION_TASK_IN_PROGRESS(409001, "当前会话正在执行 AIOps，请等待完成后再发送新消息", HttpStatus.CONFLICT, true),
     PROMETHEUS_UNAVAILABLE(503001, "监控平台暂不可用，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE, true),
     MILVUS_UNAVAILABLE(503002, "知识库服务暂不可用，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE, true),
     MCP_UNAVAILABLE(503003, "外部工具服务暂不可用，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE, true),

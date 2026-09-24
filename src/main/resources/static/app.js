@@ -98,6 +98,12 @@ class SuperBizAgentApp {
         this.sidebar = document.querySelector('.sidebar');
         this.newChatBtn = document.getElementById('newChatBtn');
         this.aiOpsSidebarBtn = document.getElementById('aiOpsSidebarBtn');
+        this.evaluationsBtn = document.getElementById('evaluationsBtn');
+        this.agentConfigBtn = document.getElementById('agentConfigBtn');
+        this.aiOpsModal = document.getElementById('aiOpsModal');
+        this.evaluationModal = document.getElementById('evaluationModal');
+        this.agentConfigModal = document.getElementById('agentConfigModal');
+        this.evaluationOutput = document.getElementById('evaluationOutput');
         
         // 输入区域元素
         this.messageInput = document.getElementById('messageInput');
@@ -132,6 +138,17 @@ class SuperBizAgentApp {
         if (this.aiOpsSidebarBtn) {
             this.aiOpsSidebarBtn.addEventListener('click', () => this.triggerAIOps());
         }
+        this.evaluationsBtn?.addEventListener('click', () => this.openModal('evaluationModal'));
+        this.agentConfigBtn?.addEventListener('click', () => this.openAgentConfig());
+        document.querySelectorAll('[data-close-modal]').forEach(button => {
+            button.addEventListener('click', () => this.closeModal(button.getAttribute('data-close-modal')));
+        });
+        document.getElementById('runAiOpsBtn')?.addEventListener('click', () => this.executeAIOps());
+        document.getElementById('runEvaluationBtn')?.addEventListener('click', () => this.executeEvaluation());
+        document.getElementById('agentProfileSelect')?.addEventListener('change', () => this.loadAgentProfile());
+        document.getElementById('reloadProfileBtn')?.addEventListener('click', () => this.loadAgentProfile());
+        document.getElementById('saveProfileBtn')?.addEventListener('click', () => this.saveAgentProfile());
+        document.getElementById('applyProfileBtn')?.addEventListener('click', () => this.applyAgentProfile());
         
         // 模式选择下拉菜单
         if (this.modeSelectorBtn) {
@@ -420,7 +437,7 @@ class SuperBizAgentApp {
     }
     
     // 加载历史对话
-    loadChatHistory(historyId) {
+    async loadChatHistory(historyId) {
         const history = this.chatHistories.find(h => h.id === historyId);
         if (!history) {
             return;
@@ -439,13 +456,34 @@ class SuperBizAgentApp {
         
         // 加载历史对话
         this.sessionId = history.id;
-        this.currentChatHistory = [...history.messages];
+        let messages = [...history.messages];
+        // The server is the source of truth for persisted CHAT and AIOps messages.
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chat/session/${encodeURIComponent(historyId)}/messages`);
+            if (response.ok) {
+                const envelope = await response.json();
+                if (Array.isArray(envelope.data)) {
+                    messages = envelope.data.map(message => ({
+                        type: message.role === 'USER' ? 'user' : 'assistant',
+                        content: message.content || '',
+                        timestamp: message.createdAt ? new Date(message.createdAt).toISOString() : new Date().toISOString(),
+                        messageType: message.messageType,
+                        status: message.status,
+                        runId: message.runId
+                    }));
+                }
+            }
+        } catch (error) {
+            console.warn('从服务端加载会话记录失败，暂时显示本地缓存:', error);
+        }
+        if (this.sessionId !== historyId) return;
+        this.currentChatHistory = messages;
         this.isCurrentChatFromHistory = true; // 标记为从历史记录加载
         
         // 清空并重新渲染消息
         if (this.chatMessages) {
             this.chatMessages.innerHTML = '';
-            history.messages.forEach(msg => {
+            messages.forEach(msg => {
                 this.addMessage(msg.type, msg.content, false, false); // false表示不是流式，false表示不保存到历史（因为已经存在）
             });
         }
@@ -1113,13 +1151,14 @@ class SuperBizAgentApp {
     }
 
     // 发送智能运维请求（SSE 流式模式）
-    async sendAIOpsRequest(loadingMessageElement) {
+    async sendAIOpsRequest(loadingMessageElement, incidentPrompt, maxSteps) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/ai_ops`, {
+            const response = await fetch(`${this.apiBaseUrl}/sessions/${encodeURIComponent(this.sessionId)}/aiops-runs`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                }
+                },
+                body: JSON.stringify({ incidentPrompt: incidentPrompt || null, maxSteps: Number(maxSteps) || 20 })
             });
 
             if (!response.ok) {
@@ -1452,26 +1491,41 @@ class SuperBizAgentApp {
         return div.innerHTML;
     }
 
-    // 触发智能运维（点击智能运维按钮时直接调用）
-    async triggerAIOps() {
+    openModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) modal.hidden = false;
+    }
+
+    closeModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) modal.hidden = true;
+    }
+
+    // 打开线上运维输入面板；排查追加到当前会话。
+    triggerAIOps() {
         if (this.isStreaming) {
             this.showNotification('请等待当前操作完成', 'warning');
             return;
         }
+        document.getElementById('aiOpsPrompt').value = '';
+        this.openModal('aiOpsModal');
+    }
 
-        // 新建对话
-        this.newChat();
-        
-        // 添加"分析中..."的消息（带旋转动画）
+    async executeAIOps() {
+        if (this.isStreaming) return;
+        const incidentPrompt = document.getElementById('aiOpsPrompt').value.trim();
+        const maxSteps = document.getElementById('aiOpsMaxSteps').value;
+        this.closeModal('aiOpsModal');
+        const requestText = incidentPrompt || '基于当前活跃告警进行排查';
+        this.addMessage('user', requestText);
         const loadingMessage = this.addLoadingMessage('分析中...');
         this.currentAIOpsMessage = loadingMessage; // 保存消息引用用于后续更新
-        
-        // 设置发送状态
         this.isStreaming = true;
         this.updateUI();
 
         try {
-            await this.sendAIOpsRequest(loadingMessage);
+            await this.sendAIOpsRequest(loadingMessage, incidentPrompt, maxSteps);
+            this.currentChatHistory.push({ type: 'assistant', content: loadingMessage.querySelector('.message-content')?.innerText || '', timestamp: new Date().toISOString() });
         } catch (error) {
             console.error('智能运维分析失败:', error);
             // 更新消息为错误信息
@@ -1481,10 +1535,148 @@ class SuperBizAgentApp {
                     messageContent.textContent = '抱歉，智能运维分析时出现错误：' + error.message;
                 }
             }
+            this.currentChatHistory.push({ type: 'assistant', content: 'AIOps 排查失败：' + error.message, timestamp: new Date().toISOString() });
         } finally {
             this.isStreaming = false;
             this.currentAIOpsMessage = null;
             this.updateUI();
+            if (this.isCurrentChatFromHistory) this.updateCurrentChatHistory();
+            else this.saveCurrentChat();
+        }
+    }
+
+    async executeEvaluation() {
+        const caseId = document.getElementById('evaluationCaseId').value.trim();
+        if (!caseId) {
+            this.showNotification('请填写 Case ID', 'warning');
+            return;
+        }
+        const output = this.evaluationOutput;
+        output.hidden = false;
+        output.textContent = '测评运行中…';
+        const button = document.getElementById('runEvaluationBtn');
+        button.disabled = true;
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/evaluations/runs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    dataset: document.getElementById('evaluationDataset').value,
+                    caseId,
+                    maxSteps: Number(document.getElementById('evaluationMaxSteps').value) || 20,
+                    agentProfile: document.getElementById('evaluationProfile').value
+                })
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let report = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (!line.startsWith('data:')) continue;
+                    const raw = line.slice(5).trim();
+                    let event;
+                    try { event = JSON.parse(raw); } catch { continue; }
+                    if (event.type === 'content') report += event.data || '';
+                    if (event.type === 'error') {
+                        const error = new Error(event.data?.message || '测评运行失败');
+                        error.isSseError = true;
+                        throw error;
+                    }
+                    if (event.type === 'done') break;
+                }
+                output.innerHTML = this.renderMarkdown(report || '测评运行中…');
+            }
+            output.innerHTML = this.renderMarkdown(report || '测评没有返回报告内容');
+            this.highlightCodeBlocks(output);
+        } catch (error) {
+            output.textContent = `测评失败：${error.message}`;
+        } finally {
+            button.disabled = false;
+        }
+    }
+
+    async openAgentConfig() {
+        this.openModal('agentConfigModal');
+        await this.loadAgentProfile();
+    }
+
+    async loadAgentProfile() {
+        const profile = document.getElementById('agentProfileSelect').value;
+        const notice = document.getElementById('profileConfigNotice');
+        notice.textContent = '正在加载配置…';
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/agent-configs/${profile}`);
+            const envelope = await response.json();
+            if (!response.ok || !envelope.data) throw new Error(envelope.message || `HTTP ${response.status}`);
+            const view = envelope.data;
+            const active = view.active;
+            const selected = view.saved || active;
+            const aiOps = profile !== 'CHAT';
+            document.getElementById('chatPromptField').hidden = aiOps;
+            document.getElementById('aiOpsPromptFields').hidden = !aiOps;
+            if (aiOps) {
+                document.getElementById('aiOpsSystemPrompt').value = selected.prompts.system || '';
+            } else {
+                document.getElementById('chatPrompt').value = selected.prompts.system || '';
+            }
+            document.getElementById('profileTemperature').value = selected.sampling.temperature;
+            document.getElementById('profileMaxTokens').value = selected.sampling.maxTokens;
+            document.getElementById('profileTopP').value = selected.sampling.topP;
+            const savedLabel = view.saved ? `；待应用版本 v${view.saved.version}` : '；无待应用版本';
+            document.getElementById('profileVersionLabel').textContent = `当前生效版本 v${active.version}${savedLabel}`;
+            document.getElementById('applyProfileBtn').disabled = !view.saved;
+            this.currentProfileView = view;
+            notice.textContent = '';
+        } catch (error) {
+            notice.textContent = `加载失败：${error.message}。请确认已执行数据库迁移 V2。`;
+        }
+    }
+
+    async saveAgentProfile() {
+        const profile = document.getElementById('agentProfileSelect').value;
+        const prompts = profile === 'CHAT'
+            ? { system: document.getElementById('chatPrompt').value }
+            : { system: document.getElementById('aiOpsSystemPrompt').value };
+        const body = {
+            prompts,
+            temperature: Number(document.getElementById('profileTemperature').value),
+            maxTokens: Number(document.getElementById('profileMaxTokens').value),
+            topP: Number(document.getElementById('profileTopP').value)
+        };
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/agent-configs/${profile}/save`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            });
+            const envelope = await response.json();
+            if (!response.ok) throw new Error(envelope.message || `HTTP ${response.status}`);
+            document.getElementById('profileConfigNotice').textContent = `已保存为待应用版本 v${envelope.data.version}`;
+            await this.loadAgentProfile();
+        } catch (error) {
+            document.getElementById('profileConfigNotice').textContent = `保存失败：${error.message}`;
+        }
+    }
+
+    async applyAgentProfile() {
+        const profile = document.getElementById('agentProfileSelect').value;
+        const version = this.currentProfileView?.saved?.version;
+        if (!version) return;
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/agent-configs/${profile}/apply`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version })
+            });
+            const envelope = await response.json();
+            if (!response.ok) throw new Error(envelope.message || `HTTP ${response.status}`);
+            document.getElementById('profileConfigNotice').textContent = `已应用版本 v${version}`;
+            await this.loadAgentProfile();
+        } catch (error) {
+            document.getElementById('profileConfigNotice').textContent = `应用失败：${error.message}`;
         }
     }
 

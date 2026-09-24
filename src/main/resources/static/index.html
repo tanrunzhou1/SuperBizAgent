@@ -41,14 +41,18 @@
 
         <!-- 主内容区域 -->
         <main class="main-content">
-            <button class="ai-ops-top-btn" id="aiOpsSidebarBtn">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span>AI Ops</span>
-            </button>
+            <div class="top-action-group">
+                <button class="ai-ops-top-btn" id="aiOpsSidebarBtn">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>AI Ops</span>
+                </button>
+                <button class="ai-ops-top-btn secondary-action-btn" id="evaluationsBtn">Evaluations</button>
+                <button class="ai-ops-top-btn secondary-action-btn" id="agentConfigBtn">Agent 配置</button>
+            </div>
             <div class="chat-container">
                 <div class="welcome-greeting" id="welcomeGreeting">
                     <p>你好！我是智能Oncall小助手</p>
@@ -116,6 +120,55 @@
                 </div>
             </div>
         </main>
+    </div>
+
+    <div class="feature-modal" id="aiOpsModal" hidden>
+        <div class="feature-dialog">
+            <div class="feature-dialog-header"><h2>线上 AIOps 排查</h2><button class="icon-close" data-close-modal="aiOpsModal">×</button></div>
+            <p>系统每次都会读取当前活跃告警。可选填补充描述。</p>
+            <label for="aiOpsPrompt">补充描述（可选）</label>
+            <textarea id="aiOpsPrompt" rows="4" placeholder="例如：请重点关注 payment-service 的不可用问题"></textarea>
+            <label for="aiOpsMaxSteps">最大工具步骤</label>
+            <input id="aiOpsMaxSteps" type="number" min="1" max="100" value="20">
+            <div class="feature-dialog-actions"><button class="secondary-btn" data-close-modal="aiOpsModal">取消</button><button class="primary-btn" id="runAiOpsBtn">开始排查</button></div>
+        </div>
+    </div>
+
+    <div class="feature-modal" id="evaluationModal" hidden>
+        <div class="feature-dialog">
+            <div class="feature-dialog-header"><h2>Evaluations 单案例测评</h2><button class="icon-close" data-close-modal="evaluationModal">×</button></div>
+            <label for="evaluationDataset">数据集</label>
+            <input id="evaluationDataset" value="cloud-ops-bench" readonly>
+            <label for="evaluationCaseId">Case ID</label>
+            <input id="evaluationCaseId" placeholder="例如 trainticket/runtime/61">
+            <label for="evaluationMaxSteps">最大工具步骤</label>
+            <input id="evaluationMaxSteps" type="number" min="1" max="100" value="20">
+            <label for="evaluationProfile">Agent 配置</label>
+            <select id="evaluationProfile"><option value="AIOPS_LIVE">当前线上 AIOps 配置（推荐）</option><option value="EVALUATION">独立测评配置</option></select>
+            <div class="feature-dialog-actions"><button class="secondary-btn" data-close-modal="evaluationModal">关闭</button><button class="primary-btn" id="runEvaluationBtn">运行测评</button></div>
+            <div id="evaluationOutput" class="evaluation-output" hidden></div>
+        </div>
+    </div>
+
+    <div class="feature-modal" id="agentConfigModal" hidden>
+        <div class="feature-dialog wide-dialog">
+            <div class="feature-dialog-header"><h2>Agent 配置</h2><button class="icon-close" data-close-modal="agentConfigModal">×</button></div>
+            <label for="agentProfileSelect">Agent Profile</label>
+            <select id="agentProfileSelect"><option value="CHAT">Chat</option><option value="AIOPS_LIVE">AIOps</option><option value="EVALUATION">Evaluations</option></select>
+            <div class="profile-version-label" id="profileVersionLabel"></div>
+            <div id="chatPromptField"><label for="chatPrompt">System Prompt</label><textarea id="chatPrompt" rows="9"></textarea></div>
+            <div id="aiOpsPromptFields" hidden>
+                <label for="aiOpsSystemPrompt">AIOps ReAct Agent 提示词</label>
+                <textarea id="aiOpsSystemPrompt" rows="12"></textarea>
+            </div>
+            <div class="sampling-grid">
+                <label>Temperature<input id="profileTemperature" type="number" step="0.05" min="0" max="2"></label>
+                <label>Max Tokens<input id="profileMaxTokens" type="number" min="1" max="32768"></label>
+                <label>Top P<input id="profileTopP" type="number" step="0.05" min="0.01" max="1"></label>
+            </div>
+            <div class="feature-dialog-actions"><button class="secondary-btn" id="reloadProfileBtn">重新加载</button><button class="secondary-btn" id="saveProfileBtn">保存</button><button class="primary-btn" id="applyProfileBtn">应用</button></div>
+            <div id="profileConfigNotice" class="profile-config-notice"></div>
+        </div>
     </div>
 
     <!-- 加载遮罩层 -->

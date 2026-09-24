@@ -2,6 +2,7 @@ package org.example.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.example.entity.ChatMessageEntity;
 import org.example.entity.ChatSessionEntity;
 import org.example.mapper.ChatMessageMapper;
@@ -70,10 +71,63 @@ public class ChatSessionService {
                         .eq(ChatMessageEntity::getSessionId, sessionId)
                         .orderByAsc(ChatMessageEntity::getSequenceNo))
                 .stream()
+                .filter(message -> {
+                    String type = message.getMessageType();
+                    if (type == null || "CHAT".equals(type) || "AIOPS_REQUEST".equals(type)) return true;
+                    return "AIOPS_RESULT".equals(type)
+                            && !"RUNNING".equals(message.getStatus())
+                            && message.getContent() != null && !message.getContent().isBlank();
+                })
                 .map(message -> Map.of(
                         "role", message.getRole().toLowerCase(),
-                        "content", message.getContent()))
+                        "content", message.getContent() == null ? "" : message.getContent()))
                 .toList();
+    }
+
+    public List<ChatMessageEntity> loadMessages(String sessionId) {
+        return chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessageEntity>()
+                .eq(ChatMessageEntity::getSessionId, sessionId)
+                .orderByAsc(ChatMessageEntity::getSequenceNo));
+    }
+
+    /** Save the AIOps user request and assistant placeholder as one ordered pair. */
+    public AiOpsMessages beginAiOps(String sessionId, String request, String runId, String traceId) {
+        final AiOpsMessages[] result = new AiOpsMessages[1];
+        withSessionLock(sessionId, () -> transactionTemplate.executeWithoutResult(status -> {
+            if (chatSessionMapper.selectBySessionId(sessionId) == null) {
+                throw new IllegalArgumentException("会话不存在");
+            }
+            Integer last = chatMessageMapper.selectMaxSequenceNo(sessionId);
+            int first = (last == null ? 0 : last) + 1;
+            String requestId = UUID.randomUUID().toString();
+            String resultId = UUID.randomUUID().toString();
+            insertMessage(sessionId, first, USER_ROLE, request, traceId, "AIOPS_REQUEST", "SUCCEEDED", runId, requestId);
+            insertMessage(sessionId, first + 1, ASSISTANT_ROLE, "正在排查当前活跃告警…", traceId,
+                    "AIOPS_RESULT", "RUNNING", runId, resultId);
+            int affected = chatSessionMapper.update(null, new LambdaUpdateWrapper<ChatSessionEntity>()
+                    .eq(ChatSessionEntity::getSessionId, sessionId)
+                    .setSql("title = COALESCE(title, {0})", truncate(request, TITLE_MAX_LENGTH))
+                    .set(ChatSessionEntity::getLastMessageAt, LocalDateTime.now()));
+            assertAffectedRows(affected, "更新会话失败");
+            result[0] = new AiOpsMessages(requestId, resultId, first + 1);
+        }));
+        return result[0];
+    }
+
+    public void finishAiOps(String sessionId, String runId, String report, boolean success) {
+        withSessionLock(sessionId, () -> transactionTemplate.executeWithoutResult(status -> {
+            int affected = chatMessageMapper.update(null, new LambdaUpdateWrapper<ChatMessageEntity>()
+                    .eq(ChatMessageEntity::getSessionId, sessionId)
+                    .eq(ChatMessageEntity::getRunId, runId)
+                    .eq(ChatMessageEntity::getMessageType, "AIOPS_RESULT")
+                    .set(ChatMessageEntity::getContent, report)
+                    .set(ChatMessageEntity::getStatus, success ? "SUCCEEDED" : "FAILED"));
+            if (affected != 1) throw new IllegalStateException("AIOps 会话结果记录不存在");
+            int updated = chatSessionMapper.update(null, new LambdaUpdateWrapper<ChatSessionEntity>()
+                    .eq(ChatSessionEntity::getSessionId, sessionId)
+                    .set(ChatSessionEntity::getLastMessageAt, LocalDateTime.now()));
+            assertAffectedRows(updated, "更新会话时间失败");
+        }));
     }
 
     /**
@@ -149,13 +203,21 @@ public class ChatSessionService {
     }
 
     private void insertMessage(String sessionId, int sequenceNo, String role, String content, String traceId) {
+        insertMessage(sessionId, sequenceNo, role, content, traceId, "CHAT", null, null, UUID.randomUUID().toString());
+    }
+
+    private void insertMessage(String sessionId, int sequenceNo, String role, String content, String traceId,
+            String messageType, String status, String runId, String messageId) {
         ChatMessageEntity message = new ChatMessageEntity();
-        message.setMessageId(UUID.randomUUID().toString());
+        message.setMessageId(messageId);
         message.setSessionId(sessionId);
         message.setSequenceNo(sequenceNo);
         message.setRole(role);
         message.setContent(content);
         message.setTraceId(traceId);
+        message.setMessageType(messageType);
+        message.setStatus(status);
+        message.setRunId(runId);
         assertAffectedRows(chatMessageMapper.insert(message), "保存聊天消息失败");
     }
 
@@ -201,4 +263,6 @@ public class ChatSessionService {
      */
     public record SessionDetails(int messagePairCount, long createTime) {
     }
+
+    public record AiOpsMessages(String requestMessageId, String resultMessageId, int resultSequenceNo) {}
 }
