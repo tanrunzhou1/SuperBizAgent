@@ -136,7 +136,7 @@ public class AgentProfileService {
             // the new single-agent default until the user saves an explicit system prompt.
             if (!CHAT.equals(profile) && (prompts == null || prompts.get("system") == null
                     || prompts.get("system").isBlank())) {
-                return aiOpsService.defaultPromptConfig();
+                return defaultPrompts(profile);
             }
             return prompts;
         } catch (Exception e) {
@@ -170,12 +170,18 @@ public class AgentProfileService {
                 sampling = new SamplingConfig(0.3, 8000, 0.9);
             }
             case EVALUATION -> {
-                prompts.putAll(aiOpsService.defaultPromptConfig());
+                prompts.putAll(aiOpsService.defaultEvaluationPromptConfig());
                 sampling = new SamplingConfig(0.3, 8000, 0.9);
             }
             default -> throw new IllegalArgumentException("Unknown agent profile: " + profile);
         }
         return new ProfileSnapshot(profile, 0, prompts, sampling, null, null);
+    }
+
+    private Map<String, String> defaultPrompts(String profile) {
+        return EVALUATION.equals(profile)
+                ? aiOpsService.defaultEvaluationPromptConfig()
+                : aiOpsService.defaultPromptConfig();
     }
 
     private void validate(String profile, Map<String, String> prompts, SamplingConfig sampling) {
