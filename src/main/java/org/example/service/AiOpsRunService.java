@@ -63,7 +63,7 @@ public class AiOpsRunService {
         ToolCallback[] tracedCallbacks = wrapToolCallbacks(toolCallbacks, trace, stepBudget);
         Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(chatModel, tracedCallbacks, context, prompts);
         if (state.isEmpty()) {
-            throw new IllegalStateException("多 Agent 编排未获取到有效结果");
+            throw new IllegalStateException("AIOps ReAct Agent 未返回有效结果");
         }
 
         String rawReport = aiOpsService.extractFinalReport(state.get()).orElse("");

@@ -1622,9 +1622,7 @@ class SuperBizAgentApp {
             document.getElementById('chatPromptField').hidden = aiOps;
             document.getElementById('aiOpsPromptFields').hidden = !aiOps;
             if (aiOps) {
-                document.getElementById('plannerPrompt').value = selected.prompts.planner || '';
-                document.getElementById('executorPrompt').value = selected.prompts.executor || '';
-                document.getElementById('supervisorPrompt').value = selected.prompts.supervisor || '';
+                document.getElementById('aiOpsSystemPrompt').value = selected.prompts.system || '';
             } else {
                 document.getElementById('chatPrompt').value = selected.prompts.system || '';
             }
@@ -1645,11 +1643,7 @@ class SuperBizAgentApp {
         const profile = document.getElementById('agentProfileSelect').value;
         const prompts = profile === 'CHAT'
             ? { system: document.getElementById('chatPrompt').value }
-            : {
-                planner: document.getElementById('plannerPrompt').value,
-                executor: document.getElementById('executorPrompt').value,
-                supervisor: document.getElementById('supervisorPrompt').value
-            };
+            : { system: document.getElementById('aiOpsSystemPrompt').value };
         const body = {
             prompts,
             temperature: Number(document.getElementById('profileTemperature').value),

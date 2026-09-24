@@ -122,15 +122,23 @@ public class AgentProfileService {
                         "sampling_config_json, created_at, applied_at FROM agent_profile_version " +
                         "WHERE profile = ? AND version_no = ?",
                 (rs, n) -> new ProfileSnapshot(rs.getString("profile"), rs.getInt("version_no"),
-                        readPrompts(rs.getString("prompt_config_json")),
+                        readPrompts(rs.getString("profile"), rs.getString("prompt_config_json")),
                         readSampling(rs.getString("sampling_config_json")),
                         rs.getString("created_at"), rs.getString("applied_at")), profile, version);
         return rows.stream().findFirst();
     }
 
-    private Map<String, String> readPrompts(String json) {
+    private Map<String, String> readPrompts(String profile, String json) {
         try {
-            return mapper.readValue(json, new TypeReference<>() {});
+            Map<String, String> prompts = mapper.readValue(json, new TypeReference<>() {});
+            // V2 profiles may contain the former planner/executor/supervisor prompt set.
+            // Those instructions cannot be combined safely into one ReAct prompt, so use
+            // the new single-agent default until the user saves an explicit system prompt.
+            if (!CHAT.equals(profile) && (prompts == null || prompts.get("system") == null
+                    || prompts.get("system").isBlank())) {
+                return aiOpsService.defaultPromptConfig();
+            }
+            return prompts;
         } catch (Exception e) {
             throw new IllegalStateException("Invalid agent prompt configuration", e);
         }
@@ -172,8 +180,7 @@ public class AgentProfileService {
 
     private void validate(String profile, Map<String, String> prompts, SamplingConfig sampling) {
         if (prompts == null || sampling == null) throw new IllegalArgumentException("提示词和采样参数不能为空");
-        List<String> required = profile.equals(CHAT) ? List.of("system")
-                : List.of("planner", "executor", "supervisor");
+        List<String> required = List.of("system");
         for (String field : required) {
             String value = prompts.get(field);
             if (value == null || value.isBlank() || value.length() > 30000) {

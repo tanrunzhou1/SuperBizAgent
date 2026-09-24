@@ -4,7 +4,7 @@
 
 本文描述普通对话、线上 AIOps 排查和 evaluations 测评的统一 Agent 配置与工作台设计。三种能力复用同一个大模型连接配置和 ReAct 执行方式，但各自使用独立 Agent 配置：提示词、采样参数和工具集合彼此隔离。普通对话与线上 AIOps 共用聊天 session；Evaluations 独立运行，测评请求和结果不进入聊天记录或普通对话上下文。
 
-这是面向后续实现的设计稿，不代表本文提到的改动已经实现。
+本文描述目标设计及其实现约束；后续修改应保持三类任务各自为单个 ReAct Agent。
 
 ## 2. 现状与差距
 
@@ -62,7 +62,7 @@ Web 工作台
   ├─ LIVE AIOps ─ sessionId ─→ SessionTaskController / ChatSessionService
   └─ Evaluations ─────────────→ EvaluationController / evaluation_result (later)
                                   │                    │
-                                  └── ReAct Agents ─────┘
+                                  └── CHAT / AIOps / Evaluation 各自的单个 ReAct Agent
                                              ↓
                    Unified Model Connection + 3 Agent Profiles
                          ├─ CHAT tools
@@ -72,13 +72,13 @@ CHAT + LIVE AIOps messages → chat_session / chat_message
 Evaluation request/result → evaluation workspace / evaluation_result only
 ```
 
-模型配置由一个模型工厂解析一次，向各任务提供相同的模型身份（provider、model、baseUrl 和凭据来源）。Agent profile 分为 `CHAT`、`AIOPS_LIVE`、`EVALUATION`，分别保存提示词模板、temperature、maxTokens、topP、profileVersion 和更新时间；工具集合与运行模式由服务端固定，不允许通过配置页面赋予越权工具。AIOps 保留领域专用的计划与执行职责，但 Planner、Executor 与普通对话均使用同一大模型连接配置，并通过 ReAct 工具循环工作。AIOps profile 可包含 Planner/Executor 等多个提示词字段，便于针对现有多 Agent 编排分别配置。
+模型配置由一个模型工厂解析，向各任务提供相同的模型身份（provider、model、baseUrl 和凭据来源）。Agent profile 分为 `CHAT`、`AIOPS_LIVE`、`EVALUATION`，分别保存一个 system prompt、temperature、maxTokens、topP、profileVersion 和更新时间；工具集合与运行模式由服务端固定，不允许通过配置页面赋予越权工具。每种任务均由一个独立的 ReAct Agent 完成推理、工具选择、观察和最终答复；AIOps 不再使用 Planner、Executor、Supervisor 等多 Agent 分工。
 
 评价可比性通过配置快照保证：每次 evaluation run 固化实际使用的 profile 名称、版本及提示词/参数快照。推荐提供“使用线上 AIOps 当前配置”选项作为评估线上能力的默认方式；如果选用独立 `EVALUATION` profile，则结果必须明确标注为该测评配置的结果，不能直接声称代表当前 LIVE 配置。三个 profile 仍可各自定制和版本化。
 
 ### 5.1 Agent 配置页面与管理 API
 
-配置页对每个 Agent 展示独立字段：system prompt（AIOps 可拆分 Planner/Executor 字段）、temperature、maxTokens、topP、当前生效版本、最新已保存未应用版本及最近更新时间。配置操作分两步：点击“保存”新增配置版本，不影响正在运行的 Agent；点击“应用”才将最新已保存版本设为生效配置。支持恢复默认配置和应用前校验必填提示词、数值范围和最大长度。模型连接参数仅展示 provider/model 标识，不显示或编辑 API key。
+配置页对每个 Agent 展示独立字段：一个 system prompt、temperature、maxTokens、topP、当前生效版本、最新已保存未应用版本及最近更新时间。配置操作分两步：点击“保存”新增配置版本，不影响正在运行的 Agent；点击“应用”才将最新已保存版本设为生效配置。支持恢复默认配置和应用前校验必填提示词、数值范围和最大长度。模型连接参数仅展示 provider/model 标识，不显示或编辑 API key。
 
 建议接口：
 
@@ -378,7 +378,7 @@ Evaluation 使用相同事件类型，并设置 `taskType=EVALUATION`、携带 `
 | `id` | `TEXT PRIMARY KEY` | 配置版本记录 ID。 |
 | `profile` | `TEXT NOT NULL` | 所属 profile。 |
 | `version_no` | `INTEGER NOT NULL` | profile 内递增版本；与 profile 组合唯一。 |
-| `prompt_config_json` | `TEXT NOT NULL` | 提示词配置；AIOps 可包含 Planner/Executor 多个字段。 |
+| `prompt_config_json` | `TEXT NOT NULL` | 提示词配置；每个 profile 使用单个 `system` 字段。 |
 | `sampling_config_json` | `TEXT NOT NULL` | temperature、maxTokens、topP 等参数。 |
 | `created_at` | `TEXT NOT NULL` | 创建时间。 |
 | `applied_at` | `TEXT` | 该版本最近一次被应用的时间；未应用版本为 NULL。 |
