@@ -22,9 +22,11 @@ import org.example.service.ChatService;
 import org.example.service.ChatSessionService;
 import org.example.service.AiOpsRunService;
 import org.example.service.AgentProfileService;
+import org.example.service.CloudOpsBenchScoringService;
 import org.example.service.SessionExecutionGuard;
 import org.example.dto.AIOpsRequest;
 import org.example.dto.AIOpsResponse;
+import org.example.dto.CloudOpsBenchScoreResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -61,6 +63,9 @@ public class ChatController {
 
     @Autowired
     private AgentProfileService agentProfileService;
+
+    @Autowired
+    private CloudOpsBenchScoringService cloudOpsBenchScoringService;
 
     @Autowired
     private SessionExecutionGuard sessionExecutionGuard;
@@ -367,6 +372,33 @@ public class ChatController {
         return emitter;
     }
 
+    @PostMapping(value = "/evaluations/scores", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<CloudOpsBenchScoreResponse> runScoredEvaluation(
+            @RequestBody EvaluationRunRequest request) throws Exception {
+        if (request == null || request.getCaseId() == null || request.getCaseId().isBlank()) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "测评请求必须提供 caseId");
+        }
+        if (request.getDataset() != null && !"cloud-ops-bench".equals(request.getDataset())) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "dataset 仅支持 cloud-ops-bench");
+        }
+        String profileName = request.getAgentProfile() == null || request.getAgentProfile().isBlank()
+                ? AgentProfileService.AIOPS_LIVE : request.getAgentProfile().trim().toUpperCase();
+        if (!AgentProfileService.AIOPS_LIVE.equals(profileName)
+                && !AgentProfileService.EVALUATION.equals(profileName)) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "agentProfile 仅支持 AIOPS_LIVE 或 EVALUATION");
+        }
+
+        AIOpsRequest replay = new AIOpsRequest();
+        replay.setCaseId(request.getCaseId().trim());
+        replay.setMaxSteps(request.getMaxSteps());
+        replay.setMode(AiOpsRunMode.REPLAY);
+        AgentProfileService.ProfileSnapshot profile = agentProfileService.getVersionOrActive(profileName,
+                request.getProfileVersion());
+        AiOpsRunContext context = replay.toRunContext();
+        AiOpsRunResult runResult = runAiOps(context, profile);
+        return ResponseEntity.ok(cloudOpsBenchScoringService.score(runResult));
+    }
+
     private SseEmitter streamSessionAiOps(String sessionId, AiOpsRunContext context,
             ChatSessionService.AiOpsMessages messages) {
         SseEmitter emitter = new SseEmitter(600000L);
@@ -556,7 +588,7 @@ public class ChatController {
         private String dataset = "cloud-ops-bench";
         private String caseId;
         private Integer maxSteps = 20;
-        private String agentProfile = AgentProfileService.AIOPS_LIVE;
+        private String agentProfile = AgentProfileService.EVALUATION;
         private Integer profileVersion;
     }
 
