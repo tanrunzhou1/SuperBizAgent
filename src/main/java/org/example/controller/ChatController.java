@@ -22,9 +22,12 @@ import org.example.service.ChatService;
 import org.example.service.ChatSessionService;
 import org.example.service.AiOpsRunService;
 import org.example.service.AgentProfileService;
+import org.example.service.CloudOpsBenchScoringService;
+import org.example.service.EvaluationRecordService;
 import org.example.service.SessionExecutionGuard;
 import org.example.dto.AIOpsRequest;
 import org.example.dto.AIOpsResponse;
+import org.example.dto.CloudOpsBenchScoreResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -61,6 +64,12 @@ public class ChatController {
 
     @Autowired
     private AgentProfileService agentProfileService;
+
+    @Autowired
+    private CloudOpsBenchScoringService cloudOpsBenchScoringService;
+
+    @Autowired
+    private EvaluationRecordService evaluationRecordService;
 
     @Autowired
     private SessionExecutionGuard sessionExecutionGuard;
@@ -304,7 +313,10 @@ public class ChatController {
         }
         request.setMode(AiOpsRunMode.REPLAY);
         AiOpsRunContext context = request.toRunContext();
-        return request.shouldStream() ? startAiOpsStream(context) : runAiOpsSync(context);
+        AgentProfileService.ProfileSnapshot profile = agentProfileService.getActive(AgentProfileService.EVALUATION);
+        return request.shouldStream()
+                ? startEvaluationStream(context, request, profile)
+                : runEvaluationSync(context, request, profile);
     }
 
     @PostMapping(value = "/sessions/{sessionId}/aiops-runs", produces = "text/event-stream;charset=UTF-8")
@@ -355,16 +367,69 @@ public class ChatController {
         AgentProfileService.ProfileSnapshot profile = agentProfileService.getVersionOrActive(profileName,
                 request.getProfileVersion());
         AiOpsRunContext context = replay.toRunContext();
+        long recordId = startEvaluationRecord(context, EvaluationRecordType.REPORT, request, profile);
         SseEmitter emitter = new SseEmitter(600000L);
-        executor.execute(() -> {
-            try {
-                streamRun(emitter, runAiOps(context, profile));
-            } catch (Exception exception) {
-                logger.error("Evaluation run failed, runId={}, caseId={}", context.getRunId(), context.getCaseId(), exception);
-                sendRunFailure(emitter, exception);
-            }
-        });
+        try {
+            executor.execute(() -> {
+                AiOpsRunResult runResult;
+                try {
+                    runResult = runAiOps(context, profile);
+                    evaluationRecordService.complete(recordId, AIOpsResponse.from(runResult));
+                } catch (Exception exception) {
+                    logger.error("Evaluation run failed, runId={}, caseId={}",
+                            context.getRunId(), context.getCaseId(), exception);
+                    markEvaluationFailed(recordId, exception);
+                    sendRunFailure(emitter, exception);
+                    return;
+                }
+                try {
+                    streamRun(emitter, runResult);
+                } catch (IOException exception) {
+                    logger.warn("Evaluation result persisted but SSE delivery failed, runId={}",
+                            context.getRunId(), exception);
+                    emitter.completeWithError(exception);
+                }
+            });
+        } catch (RuntimeException exception) {
+            markEvaluationFailed(recordId, exception);
+            throw exception;
+        }
         return emitter;
+    }
+
+    @PostMapping(value = "/evaluations/scores", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<CloudOpsBenchScoreResponse> runScoredEvaluation(
+            @RequestBody EvaluationRunRequest request) throws Exception {
+        if (request == null || request.getCaseId() == null || request.getCaseId().isBlank()) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "测评请求必须提供 caseId");
+        }
+        if (request.getDataset() != null && !"cloud-ops-bench".equals(request.getDataset())) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "dataset 仅支持 cloud-ops-bench");
+        }
+        String profileName = request.getAgentProfile() == null || request.getAgentProfile().isBlank()
+                ? AgentProfileService.AIOPS_LIVE : request.getAgentProfile().trim().toUpperCase();
+        if (!AgentProfileService.AIOPS_LIVE.equals(profileName)
+                && !AgentProfileService.EVALUATION.equals(profileName)) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST, "agentProfile 仅支持 AIOPS_LIVE 或 EVALUATION");
+        }
+
+        AIOpsRequest replay = new AIOpsRequest();
+        replay.setCaseId(request.getCaseId().trim());
+        replay.setMaxSteps(request.getMaxSteps());
+        replay.setMode(AiOpsRunMode.REPLAY);
+        AgentProfileService.ProfileSnapshot profile = agentProfileService.getVersionOrActive(profileName,
+                request.getProfileVersion());
+        AiOpsRunContext context = replay.toRunContext();
+        long recordId = startEvaluationRecord(context, EvaluationRecordType.SCORE, request, profile);
+        try {
+            AiOpsRunResult runResult = runAiOps(context, profile);
+            CloudOpsBenchScoreResponse score = cloudOpsBenchScoringService.score(runResult);
+            evaluationRecordService.complete(recordId, score);
+            return ResponseEntity.ok(score);
+        } catch (Exception exception) {
+            markEvaluationFailed(recordId, exception);
+            throw exception;
+        }
     }
 
     private SseEmitter streamSessionAiOps(String sessionId, AiOpsRunContext context,
@@ -474,6 +539,77 @@ public class ChatController {
         return aiOpsRunService.run(chatModel, context, profile.prompts());
     }
 
+    private ResponseEntity<ApiResponse<AIOpsResponse>> runEvaluationSync(AiOpsRunContext context,
+            AIOpsRequest request, AgentProfileService.ProfileSnapshot profile) {
+        long recordId = startEvaluationRecord(context, EvaluationRecordType.REPORT, request, profile);
+        try {
+            AiOpsRunResult runResult = runAiOps(context, profile);
+            AIOpsResponse response = AIOpsResponse.from(runResult);
+            evaluationRecordService.complete(recordId, response);
+            return ResponseEntity.ok(ApiResponse.success(response));
+        } catch (Exception exception) {
+            logger.error("Evaluation run failed, runId={}, caseId={}", context.getRunId(), context.getCaseId(), exception);
+            markEvaluationFailed(recordId, exception);
+            ErrorCode errorCode = exception instanceof IllegalArgumentException
+                    ? ErrorCode.BUSINESS_ERROR : ErrorCode.MODEL_UNAVAILABLE;
+            throw new BusinessException(errorCode, "测评执行失败: " + safeMessage(exception));
+        }
+    }
+
+    private SseEmitter startEvaluationStream(AiOpsRunContext context, AIOpsRequest request,
+            AgentProfileService.ProfileSnapshot profile) {
+        long recordId = startEvaluationRecord(context, EvaluationRecordType.REPORT, request, profile);
+        SseEmitter emitter = new SseEmitter(600000L);
+        try {
+            executor.execute(() -> {
+                AiOpsRunResult runResult;
+                try {
+                    runResult = runAiOps(context, profile);
+                    evaluationRecordService.complete(recordId, AIOpsResponse.from(runResult));
+                } catch (Exception exception) {
+                    logger.error("Evaluation run failed, runId={}, caseId={}",
+                            context.getRunId(), context.getCaseId(), exception);
+                    markEvaluationFailed(recordId, exception);
+                    sendRunFailure(emitter, exception);
+                    return;
+                }
+                try {
+                    streamRun(emitter, runResult);
+                } catch (IOException exception) {
+                    logger.warn("Evaluation result persisted but SSE delivery failed, runId={}",
+                            context.getRunId(), exception);
+                    emitter.completeWithError(exception);
+                }
+            });
+        } catch (RuntimeException exception) {
+            markEvaluationFailed(recordId, exception);
+            throw exception;
+        }
+        return emitter;
+    }
+
+    private long startEvaluationRecord(AiOpsRunContext context, String type, Object request,
+            AgentProfileService.ProfileSnapshot profile) {
+        return evaluationRecordService.start(context, type, request, profile.profile(), profile.version(),
+                chatService.currentModelProvider(), chatService.currentModelName());
+    }
+
+    private void markEvaluationFailed(long recordId, Exception exception) {
+        try {
+            evaluationRecordService.fail(recordId, safeMessage(exception));
+        } catch (RuntimeException persistenceException) {
+            logger.error("Unable to mark evaluation record failed, id={}", recordId, persistenceException);
+        }
+    }
+
+    private static final class EvaluationRecordType {
+        private static final String REPORT = "REPORT";
+        private static final String SCORE = "SCORE";
+
+        private EvaluationRecordType() {
+        }
+    }
+
     private String safeMessage(Exception exception) {
         String message = exception.getMessage();
         return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
@@ -556,7 +692,7 @@ public class ChatController {
         private String dataset = "cloud-ops-bench";
         private String caseId;
         private Integer maxSteps = 20;
-        private String agentProfile = AgentProfileService.AIOPS_LIVE;
+        private String agentProfile = AgentProfileService.EVALUATION;
         private Integer profileVersion;
     }
 

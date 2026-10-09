@@ -11,3 +11,5 @@ services:
       - ./application.yml:/app/config/application.yml:ro
       - ./db:/app/db
       - ./uploads:/app/uploads
+      - ./Cloud-OpsBench/benchmark:/app/data/benchmark:ro
+      - ./Cloud-OpsBench/process-label:/app/data/process-label:ro

@@ -71,6 +71,21 @@ public class CloudOpsBenchCaseRepository {
         }
     }
 
+    public JsonNode loadProcessLabel(String caseId) {
+        validateCaseId(caseId);
+        Path labelPath = datasetRoot.getParent().resolve("process-label")
+                .resolve(caseId).resolve("milestone.json").normalize();
+        Path labelRoot = datasetRoot.getParent().resolve("process-label").normalize();
+        if (!labelPath.startsWith(labelRoot) || !Files.isRegularFile(labelPath)) {
+            throw new IllegalArgumentException("Cloud-OpsBench 评分标注不存在: " + labelPath);
+        }
+        try {
+            return objectMapper.readTree(Files.readString(labelPath));
+        } catch (IOException exception) {
+            throw new IllegalStateException("读取 Cloud-OpsBench 评分标注失败: " + caseId, exception);
+        }
+    }
+
     public void validateCaseId(String caseId) {
         if (caseId == null || !CASE_ID_PATTERN.matcher(caseId).matches()) {
             throw new IllegalArgumentException("caseId 格式非法，应为 dataset/category/number");

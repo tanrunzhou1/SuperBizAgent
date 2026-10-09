@@ -106,6 +106,16 @@ public class ChatService {
         return normalized(aiModelProperties.getProvider(), "dashscope");
     }
 
+    /**
+     * 获取当前生效的模型名称，用于测评运行记录。
+     *
+     * @return 模型名称
+     */
+    public String currentModelName() {
+        String provider = normalized(aiModelProperties.getProvider(), "dashscope");
+        return resolvedModelName(provider);
+    }
+
     private String resolvedModelName(String provider) {
         if ("dashscope".equals(provider)) {
             return firstNonBlank(aiModelProperties.getModel(),
